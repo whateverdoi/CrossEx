@@ -57,19 +57,20 @@ def _parse_rss(xml_text: str) -> list[dict]:
         )
     except ET.ParseError:
         return []
+
+    def text(item: ET.Element, tag: str) -> str | None:
+        el = item.find(tag)
+        if el is None or not el.text:
+            return None
+        return el.text.strip()
+
     items: list[dict] = []
     for item in root.iter("item"):
-        def text(tag: str) -> str | None:
-            el = item.find(tag)
-            if el is None or not el.text:
-                return None
-            return el.text.strip()
-
-        title = text("title")
+        title = text(item, "title")
         if not title:
             continue
 
-        date = text("pubDate")
+        date = text(item, "pubDate")
         if date:
             try:
                 date = parsedate_to_datetime(date).isoformat()
@@ -81,17 +82,20 @@ def _parse_rss(xml_text: str) -> list[dict]:
         if source_el is not None and source_el.text:
             source = source_el.text.strip()
 
-        items.append({
-            "title": title,
-            "date": date,
-            "source": source,
-            "link": text("link"),
-        })
+        items.append(
+            {
+                "title": title,
+                "date": date,
+                "source": source,
+                "link": text(item, "link"),
+            }
+        )
     return items
 
 
-def _fetch_rss(url: str, query: str, limit: int,
-               client: httpx.Client | None) -> list[dict] | None:
+def _fetch_rss(
+    url: str, query: str, limit: int, client: httpx.Client | None
+) -> list[dict] | None:
     """公共路径：GET RSS → 解析 → 截取 limit 条；失败返回 None。"""
     try:
         c = client or _get_client()
@@ -102,16 +106,18 @@ def _fetch_rss(url: str, query: str, limit: int,
     return _parse_rss(resp.text)[:limit]
 
 
-def fetch_news_rss(query: str, limit: int = 10,
-                   client: httpx.Client | None = None) -> list[dict] | None:
+def fetch_news_rss(
+    query: str, limit: int = 10, client: httpx.Client | None = None
+) -> list[dict] | None:
     """Bing News RSS 检索（六维 news 维度素材）。"""
     if env.is_mock_mode():
         return mock.mock_news_rss(query)[:limit]
     return _fetch_rss(NEWS_URL, query, limit, client)
 
 
-def fetch_web_rss(query: str, limit: int = 10,
-                  client: httpx.Client | None = None) -> list[dict] | None:
+def fetch_web_rss(
+    query: str, limit: int = 10, client: httpx.Client | None = None
+) -> list[dict] | None:
     """Bing Web RSS 检索（六维查询模板素材）。"""
     if env.is_mock_mode():
         return mock.mock_web_rss(query)[:limit]

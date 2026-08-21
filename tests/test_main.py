@@ -1,10 +1,9 @@
 """01 票 RED：SR_MOCK=1 主流程产出 run.json + overview.md 骨架。"""
+
 from __future__ import annotations
 
 import json
 from pathlib import Path
-
-import pytest
 
 from strategy_research.main import main
 

@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Any, Callable, TypeVar
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 from binance_common.configuration import ConfigurationRestAPI
 from binance_common.constants import (
@@ -253,8 +254,6 @@ def sync_call_with_rate_limit(
                     "— 中止本轮"
                 ) from exc
             if attempt == attempts - 1:
-                raise RuntimeError(
-                    f"{name} API 重试 {attempts} 次后仍失败"
-                ) from exc
+                raise RuntimeError(f"{name} API 重试 {attempts} 次后仍失败") from exc
             time.sleep(wait)
     raise RuntimeError(f"{name} API 重试 {attempts} 次后仍失败")

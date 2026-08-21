@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from typing import ClassVar
 
 import pytest
 from binance_common.errors import RateLimitBanError, TooManyRequestsError
@@ -11,7 +12,6 @@ from pydantic import BaseModel
 from strategy_research.datasources import _binance_sdk as sdk
 from strategy_research.datasources import binance as binance_ds
 from strategy_research.datasources.mock import MOCK_TOKENS
-
 
 # ── to_plain 解包 ───────────────────────────────────────────
 
@@ -35,8 +35,9 @@ def test_to_plain_unpacks_basemodel_with_to_dict() -> None:
 
 
 def test_to_plain_unwraps_actual_instance() -> None:
-    plain = sdk.to_plain(OneOf(actual_instance=Response(
-        symbol="ETHUSDT", nested=Nested(value=1))))
+    plain = sdk.to_plain(
+        OneOf(actual_instance=Response(symbol="ETHUSDT", nested=Nested(value=1)))
+    )
     assert plain == {"symbol": "ETHUSDT", "nested": {"value": 1}}
 
 
@@ -90,7 +91,7 @@ def test_sdk_call_returns_plain_dict() -> None:
 
 def test_retry_after_from_headers() -> None:
     class FakeExc:
-        headers = {"Retry-After": "30"}
+        headers: ClassVar[dict[str, str]] = {"Retry-After": "30"}
 
     assert sdk._retry_after_from(FakeExc()) == 30.0
     assert sdk._retry_after_from(Exception()) is None
@@ -126,35 +127,38 @@ def test_weight_budget_expires_old_events() -> None:
 def test_sync_call_with_rate_limit_succeeds() -> None:
     budget = sdk.WeightBudget(limit=100)
     result = sdk.sync_call_with_rate_limit(
-        lambda: {"ok": 1}, name="test", weight=1, budget=budget)
+        lambda: {"ok": 1}, name="test", weight=1, budget=budget
+    )
     assert result == {"ok": 1}
     assert budget.used() == 1
 
 
-def test_sync_call_with_rate_limit_gives_up(
-        monkeypatch: pytest.MonkeyPatch) -> None:
+def test_sync_call_with_rate_limit_gives_up(monkeypatch: pytest.MonkeyPatch) -> None:
     """重试耗尽仍失败 → RuntimeError，不吞异常。"""
+
     def boom(*args, **kwargs):
         raise TooManyRequestsError(status_code=429)
 
     monkeypatch.setattr(sdk, "_backoff_seconds", lambda exc, n: 0.001)
     with pytest.raises(RuntimeError, match="重试"):
         sdk.sync_call_with_rate_limit(
-            boom, name="test", attempts=2, weight=1,
-            budget=sdk.WeightBudget(limit=100))
+            boom, name="test", attempts=2, weight=1, budget=sdk.WeightBudget(limit=100)
+        )
 
 
 def test_sync_call_with_rate_limit_aborts_on_long_ban(
-        monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """418 且退避超上限（默认 600s）→ 立即中止，不傻等。"""
+
     def fn(*args, **kwargs):
         raise RateLimitBanError(status_code=418)
 
     monkeypatch.setattr(sdk, "_backoff_seconds", lambda exc, n: 999999.0)
     with pytest.raises(RuntimeError, match="封禁"):
         sdk.sync_call_with_rate_limit(
-            fn, name="test", attempts=2, weight=1,
-            budget=sdk.WeightBudget(limit=100))
+            fn, name="test", attempts=2, weight=1, budget=sdk.WeightBudget(limit=100)
+        )
 
 
 # ── 现货 24hr ticker ────────────────────────────────────────
@@ -165,25 +169,29 @@ def test_fetch_ticker_24h_all_mock() -> None:
     assert rows is not None
     assert len(rows) == len(MOCK_TOKENS)
     symbols = {r["symbol"] for r in rows}
-    assert symbols == set(MOCK_TOKENS)
+    assert symbols == {s + "USDT" for s in MOCK_TOKENS}
     for row in rows:
-        assert set(row) == {"symbol", "price_change_pct", "quote_volume"}
+        assert set(row) == {"symbol", "price", "price_change_pct", "quote_volume"}
+        assert isinstance(row["price"], float)
         assert isinstance(row["price_change_pct"], float)
         assert isinstance(row["quote_volume"], float)
 
 
 def test_fetch_ticker_24h_all_mock_zero_external_requests(
-        monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """SR_MOCK=1 时零外部请求：SDK 单例被调用即爆炸也不影响。"""
     monkeypatch.setattr(
         "strategy_research.datasources._binance_sdk.get_spot_data_client",
-        lambda: pytest.fail("mock 模式不应触碰 SDK"))
+        lambda: pytest.fail("mock 模式不应触碰 SDK"),
+    )
     rows = binance_ds.fetch_ticker_24h_all()
     assert rows is not None and len(rows) == 6
 
 
 def test_fetch_ticker_24h_all_real_failure_returns_none(
-        monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """失败即失败：网络异常 → None（装配层标 UNKNOWN），不回退 mock。"""
     monkeypatch.setenv("SR_MOCK", "0")
 
@@ -191,31 +199,47 @@ def test_fetch_ticker_24h_all_real_failure_returns_none(
         raise RuntimeError("connection refused")
 
     monkeypatch.setattr(
-        "strategy_research.datasources._binance_sdk.sync_call_with_rate_limit",
-        boom)
+        "strategy_research.datasources._binance_sdk.sync_call_with_rate_limit", boom
+    )
     assert binance_ds.fetch_ticker_24h_all() is None
 
 
-def test_fetch_ticker_24h_all_real_maps_fields(
-        monkeypatch: pytest.MonkeyPatch) -> None:
-    """真实响应 → {symbol, price_change_pct, quote_volume}（float 化）。"""
+def test_fetch_ticker_24h_all_real_maps_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    """真实响应 → {symbol, price, price_change_pct, quote_volume}（float 化）。"""
     monkeypatch.setenv("SR_MOCK", "0")
 
     def fake_call(fn, **kwargs):
         return [
-            {"symbol": "BTCUSDT", "priceChangePercent": "2.5",
-             "quoteVolume": "123456.78"},
-            {"symbol": "ETHUSDT", "priceChangePercent": "-1.2",
-             "quoteVolume": "90000.0"},
+            {
+                "symbol": "BTCUSDT",
+                "lastPrice": "70000.0",
+                "priceChangePercent": "2.5",
+                "quoteVolume": "123456.78",
+            },
+            {
+                "symbol": "ETHUSDT",
+                "lastPrice": "3500.0",
+                "priceChangePercent": "-1.2",
+                "quoteVolume": "90000.0",
+            },
         ]
 
     monkeypatch.setattr(
         "strategy_research.datasources._binance_sdk.sync_call_with_rate_limit",
-        fake_call)
+        fake_call,
+    )
     rows = binance_ds.fetch_ticker_24h_all()
     assert rows == [
-        {"symbol": "BTCUSDT", "price_change_pct": 2.5,
-         "quote_volume": 123456.78},
-        {"symbol": "ETHUSDT", "price_change_pct": -1.2,
-         "quote_volume": 90000.0},
+        {
+            "symbol": "BTCUSDT",
+            "price": 70000.0,
+            "price_change_pct": 2.5,
+            "quote_volume": 123456.78,
+        },
+        {
+            "symbol": "ETHUSDT",
+            "price": 3500.0,
+            "price_change_pct": -1.2,
+            "quote_volume": 90000.0,
+        },
     ]

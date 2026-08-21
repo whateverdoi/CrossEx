@@ -3,6 +3,7 @@
 验收映射：次新过滤 / 波动榜排序 / 稳定币排除 / 快照失败抛 ScreeningError /
 rank 空注册表不抛异常 / mock 固定 6 候选 / 手动模式 meta.screening.mode。
 """
+
 from __future__ import annotations
 
 import pytest
@@ -36,8 +37,12 @@ def _row(symbol: str, change=None, vol=None, days=None) -> dict:
 def test_filter_listing_days_lt_keeps_recent_only():
     from strategy_research.screener import FILTERS
 
-    rows = [_row("A", days=45), _row("B", days=100), _row("C", days=101),
-            _row("D")]  # listing_days 缺失（UNKNOWN 保守排除）
+    rows = [
+        _row("A", days=45),
+        _row("B", days=100),
+        _row("C", days=101),
+        _row("D"),
+    ]  # listing_days 缺失（UNKNOWN 保守排除）
     out = FILTERS["listing_days_lt"]({"max_days": 100}).apply(rows)
     assert [r["symbol"] for r in out] == ["A", "B"]
 
@@ -45,8 +50,12 @@ def test_filter_listing_days_lt_keeps_recent_only():
 def test_filter_min_quote_volume_keeps_above_floor():
     from strategy_research.screener import FILTERS
 
-    rows = [_row("A", vol=1e8), _row("B", vol=1e7), _row("C", vol=5e6),
-            _row("D")]  # 缺失排除
+    rows = [
+        _row("A", vol=1e8),
+        _row("B", vol=1e7),
+        _row("C", vol=5e6),
+        _row("D"),
+    ]  # 缺失排除
     out = FILTERS["min_quote_volume"]({"min_quote_volume": 1e7}).apply(rows)
     assert [r["symbol"] for r in out] == ["A", "B"]
 
@@ -54,9 +63,15 @@ def test_filter_min_quote_volume_keeps_above_floor():
 def test_filter_exclude_stablecoins():
     from strategy_research.screener import FILTERS
 
-    rows = [_row("BTCUSDT"), _row("USDCUSDT"), _row("FDUSDUSDT"),
-            _row("TUSDUSDT"), _row("BTCFDUSD"), _row("FRAXUSDT"),
-            _row("USDDUSDT")]
+    rows = [
+        _row("BTCUSDT"),
+        _row("USDCUSDT"),
+        _row("FDUSDUSDT"),
+        _row("TUSDUSDT"),
+        _row("BTCFDUSD"),
+        _row("FRAXUSDT"),
+        _row("USDDUSDT"),
+    ]
     out = FILTERS["exclude_stablecoins"]({}).apply(rows)
     assert [r["symbol"] for r in out] == ["BTCUSDT", "BTCFDUSD"]
 
@@ -145,8 +160,13 @@ def _fake_tickers() -> list[dict]:
 
 
 def _fake_listing() -> dict[str, int]:
-    return {"BTCUSDT": 2000, "SOLUSDT": 90, "NEWUSDT": 45,
-            "OLDUSDT": 101, "USDCUSDT": 500}
+    return {
+        "BTCUSDT": 2000,
+        "SOLUSDT": 90,
+        "NEWUSDT": 45,
+        "OLDUSDT": 101,
+        "USDCUSDT": 500,
+    }
 
 
 def _patch_fetch(monkeypatch) -> None:
@@ -168,7 +188,8 @@ def test_select_tokens_auto_filters_ranks_and_annotates(monkeypatch):
     ]
     # 过滤掉 OLDUSDT(101 天) 与 USDCUSDT(稳定币)；波动榜 → SOLUSDT 居首
     assert [c["symbol"] for c in result.candidates] == [
-        "SOLUSDT", "NEWUSDT",
+        "SOLUSDT",
+        "NEWUSDT",
     ]
     c = result.candidates[0]
     assert "volatility_24h" in c["reason"]
@@ -199,8 +220,9 @@ def test_select_tokens_no_rank_rules_skips_sorting(monkeypatch):
 
 def test_select_tokens_unknown_fields_conservative(monkeypatch):
     monkeypatch.setenv("SR_MOCK", "0")
-    monkeypatch.setattr(binance, "fetch_ticker_24h_all",
-                        lambda: [{"symbol": "NOINFOUSDT"}])  # 全字段缺失
+    monkeypatch.setattr(
+        binance, "fetch_ticker_24h_all", lambda: [{"symbol": "NOINFOUSDT"}]
+    )  # 全字段缺失
     monkeypatch.setattr(binance_futures, "fetch_listing_days", dict)
     result = select_tokens(DEFAULT_RULES, top_n=10)
     assert result.candidates == []  # UNKNOWN 保守排除，无候选但不抛
@@ -227,10 +249,12 @@ def test_select_tokens_unknown_rule_kind_raises(monkeypatch):
 def test_select_tokens_multiple_rank_rules_raises(monkeypatch):
     _patch_fetch(monkeypatch)
     with pytest.raises(ScreeningError, match="单一 rank"):
-        select_tokens([
-            ScreenRule("rank", "volatility_24h"),
-            ScreenRule("rank", "gain_24h"),
-        ])
+        select_tokens(
+            [
+                ScreenRule("rank", "volatility_24h"),
+                ScreenRule("rank", "gain_24h"),
+            ]
+        )
 
 
 # ── mock 模式 ──────────────────────────────────────────────
@@ -247,7 +271,12 @@ def test_select_tokens_mock_mode_fixed_candidates_no_io(monkeypatch):
     result = select_tokens(DEFAULT_RULES)
     assert result.mode == "mock"
     assert [c["symbol"] for c in result.candidates] == [
-        "BTC", "ETH", "SOL", "UNI", "DOGE", "XRP",
+        "BTC",
+        "ETH",
+        "SOL",
+        "UNI",
+        "DOGE",
+        "XRP",
     ]
     assert all(c["reason"] == "mock 固定候选" for c in result.candidates)
 
@@ -275,6 +304,11 @@ def test_main_auto_mode_uses_screener(monkeypatch, tmp_path):
     screening = meta["screening"]
     assert screening["mode"] == "mock"
     assert [c["symbol"] for c in screening["candidates"]] == [
-        "BTC", "ETH", "SOL", "UNI", "DOGE", "XRP",
+        "BTC",
+        "ETH",
+        "SOL",
+        "UNI",
+        "DOGE",
+        "XRP",
     ]
     assert screening["rules"]  # describe 落盘，报告可审计

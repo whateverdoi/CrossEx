@@ -93,8 +93,7 @@ def test_fetch_news_rss_real_parses(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "format=rss" in captured["url"]
 
 
-def test_fetch_web_rss_uses_search_endpoint(
-        monkeypatch: pytest.MonkeyPatch) -> None:
+def test_fetch_web_rss_uses_search_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
     """Web RSS 走 /search 端点（与 News RSS 同族）。"""
     monkeypatch.setenv("SR_MOCK", "0")
     captured: dict = {}
@@ -120,6 +119,7 @@ def test_mock_zero_external_requests(monkeypatch: pytest.MonkeyPatch) -> None:
     """SR_MOCK=1 时零外部请求：httpx.Client 被调用即爆炸也不影响。"""
     monkeypatch.setattr(
         "strategy_research.datasources.web._get_client",
-        lambda: pytest.fail("mock 模式不应发起 HTTP"))
+        lambda: pytest.fail("mock 模式不应发起 HTTP"),
+    )
     assert web.fetch_news_rss("BTC") is not None
     assert web.fetch_web_rss("BTC") is not None

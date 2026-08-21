@@ -1,0 +1,6 @@
+# 项目级 ruff 配置（独立配置文件，项目无 pyproject.toml）
+# BLE001: 数据源层"失败即失败"纪律——网络边界盲捕获 Exception 返回 None，
+#         装配层据此标 UNKNOWN；全项目统一模式（binance/binance_futures/
+#         defillama/web 各 fetch 均如此），显式忽略。
+[lint]
+ignore = ["BLE001"]

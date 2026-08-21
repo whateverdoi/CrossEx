@@ -1,7 +1,6 @@
 """01 票 RED：图结构 + SR_MOCK=1 端到端跑通。"""
-from __future__ import annotations
 
-import pytest
+from __future__ import annotations
 
 from strategy_research.graph import build_graph
 

@@ -57,7 +57,8 @@ class ListingDaysLtFilter(_Rule):
     def apply(self, rows: list[dict]) -> list[dict]:
         max_days = self.params.get("max_days", 100)
         return [
-            r for r in rows
+            r
+            for r in rows
             if isinstance(r.get("listing_days"), int) and r["listing_days"] <= max_days
         ]
 
@@ -68,16 +69,32 @@ class MinQuoteVolumeFilter(_Rule):
     def apply(self, rows: list[dict]) -> list[dict]:
         floor = self.params.get("min_quote_volume", 1e7)
         return [
-            r for r in rows
+            r
+            for r in rows
             if isinstance(r.get("quote_volume"), (int, float))
             and r["quote_volume"] >= floor
         ]
 
 
 #: 稳定币集合（计价后缀与标的双重判定用）
-_STABLE_BASES = {"USDT", "USDC", "FDUSD", "TUSD", "BUSD", "DAI",
-                 "USDD", "FRAX", "LUSD", "USDE", "USDP", "PYUSD",
-                 "GUSD", "AEUR", "EURT", "EURI"}
+_STABLE_BASES = {
+    "USDT",
+    "USDC",
+    "FDUSD",
+    "TUSD",
+    "BUSD",
+    "DAI",
+    "USDD",
+    "FRAX",
+    "LUSD",
+    "USDE",
+    "USDP",
+    "PYUSD",
+    "GUSD",
+    "AEUR",
+    "EURT",
+    "EURI",
+}
 
 
 def _is_stablecoin_pair(symbol: str) -> bool:
@@ -186,7 +203,8 @@ def describe(rules: list[ScreenRule]) -> list[str]:
 def _candidate(row: dict, rules_desc: str) -> dict:
     """候选：symbol + reason（命中规则 + 指标值）+ metrics。"""
     metrics = {
-        k: row[k] for k in ("price_change_pct", "quote_volume", "listing_days")
+        k: row[k]
+        for k in ("price_change_pct", "quote_volume", "listing_days")
         if row.get(k) not in (None, UNKNOWN)
     }
     metric_desc = "、".join(f"{k}={v}" for k, v in metrics.items())
@@ -210,21 +228,21 @@ def select_tokens(rules: list[ScreenRule], top_n: int = 10) -> ScreeningResult:
     tickers = binance.fetch_ticker_24h_all()
     listing = binance_futures.fetch_listing_days()
     if tickers is None or listing is None:
-        raise ScreeningError(
-            "全市场快照拉取失败，批终止（失败即失败，不回退 mock）"
-        )
+        raise ScreeningError("全市场快照拉取失败，批终止（失败即失败，不回退 mock）")
 
     rows: list[dict] = []
     for t in tickers:
         symbol = t.get("symbol")
         if not symbol:
             continue  # 无 symbol 无法参与筛选，跳过
-        rows.append({
-            "symbol": symbol,
-            "price_change_pct": t.get("price_change_pct"),
-            "quote_volume": t.get("quote_volume"),
-            "listing_days": listing.get(symbol, UNKNOWN),
-        })
+        rows.append(
+            {
+                "symbol": symbol,
+                "price_change_pct": t.get("price_change_pct"),
+                "quote_volume": t.get("quote_volume"),
+                "listing_days": listing.get(symbol, UNKNOWN),
+            }
+        )
 
     rank_rules: list[ScreenRule] = []
     for rule in rules:
@@ -236,16 +254,12 @@ def select_tokens(rules: list[ScreenRule], top_n: int = 10) -> ScreeningResult:
         elif rule.kind == "rank":
             rank_rules.append(rule)
         else:
-            raise ScreeningError(
-                f"未知规则类别: {rule.kind!r}（仅支持 filter/rank）"
-            )
+            raise ScreeningError(f"未知规则类别: {rule.kind!r}（仅支持 filter/rank）")
     if len(rank_rules) > 1:
         raise ScreeningError(f"只支持单一 rank 规则，收到 {len(rank_rules)} 条")
     if rank_rules:
         try:
-            rows = RANKERS[rank_rules[0].name](
-                rank_rules[0].params
-            ).apply(rows)
+            rows = RANKERS[rank_rules[0].name](rank_rules[0].params).apply(rows)
         except KeyError as exc:
             raise ScreeningError(f"未知排序规则: {rank_rules[0].name}") from exc
 

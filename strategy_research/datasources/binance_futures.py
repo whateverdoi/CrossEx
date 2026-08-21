@@ -10,6 +10,10 @@
 - ``fetch_exchange_info``：全量交易对信息
 - ``fetch_listing_days``：``dict[symbol, 上市天数]``（onboardDate 毫秒口径，
   与 ``market_data.listing_days`` 一致；onboardDate=0 视为未知跳过）
+- ``fetch_premium_index_all``：全量 premiumIndex（批内一次，含 funding）
+- ``fetch_fapi_prices_all``：全量合约价格（批内一次）
+- ``fetch_funding_rate_history``：资金费率历史（funding_avg_7d / trend）
+- ``fetch_open_interest``：当前持仓量（单 symbol）
 
 所有 fetch 失败返回 ``None``（装配层标 UNKNOWN，失败即失败不回退 mock）。
 """
@@ -17,7 +21,8 @@
 from __future__ import annotations
 
 import time
-from typing import Callable, Any
+from collections.abc import Callable
+from typing import Any
 
 from .. import env
 from . import _binance_sdk, mock
@@ -35,28 +40,38 @@ _SERIES_ENDPOINTS: dict[str, Callable] = {
 #: 使真实输出与 mock 同构（snake_case + 数值类型）
 _SERIES_FIELD_MAPS: dict[str, tuple[dict[str, str], set[str]]] = {
     "open_interest_hist": (
-        {"sumOpenInterest": "sum_open_interest",
-         "sumOpenInterestValue": "sum_open_interest_value"},
+        {
+            "sumOpenInterest": "sum_open_interest",
+            "sumOpenInterestValue": "sum_open_interest_value",
+        },
         {"sum_open_interest", "sum_open_interest_value"},
     ),
     "global_long_short": (
-        {"longShortRatio": "long_short_ratio",
-         "longAccount": "long_account", "shortAccount": "short_account"},
+        {
+            "longShortRatio": "long_short_ratio",
+            "longAccount": "long_account",
+            "shortAccount": "short_account",
+        },
         {"long_short_ratio", "long_account", "short_account"},
     ),
     "top_ls_accounts": (
-        {"longShortRatio": "long_short_ratio",
-         "longAccount": "long_account", "shortAccount": "short_account"},
+        {
+            "longShortRatio": "long_short_ratio",
+            "longAccount": "long_account",
+            "shortAccount": "short_account",
+        },
         {"long_short_ratio", "long_account", "short_account"},
     ),
     "top_ls_positions": (
-        {"longShortRatio": "long_short_ratio",
-         "longAccount": "long_account", "shortAccount": "short_account"},
+        {
+            "longShortRatio": "long_short_ratio",
+            "longAccount": "long_account",
+            "shortAccount": "short_account",
+        },
         {"long_short_ratio", "long_account", "short_account"},
     ),
     "taker_bs": (
-        {"buySellRatio": "buy_sell_ratio", "buyVol": "buy_vol",
-         "sellVol": "sell_vol"},
+        {"buySellRatio": "buy_sell_ratio", "buyVol": "buy_vol", "sellVol": "sell_vol"},
         {"buy_sell_ratio", "buy_vol", "sell_vol"},
     ),
 }
@@ -121,8 +136,9 @@ def _map_series_row(endpoint: str, row: dict, symbol: str) -> dict:
     return out
 
 
-def _fetch_series(endpoint: str, symbol: str, period: str,
-                  limit: int) -> list[dict] | None:
+def _fetch_series(
+    endpoint: str, symbol: str, period: str, limit: int
+) -> list[dict] | None:
     """历史序列端点公共路径（权重 1/请求）。"""
     if env.is_mock_mode():
         return mock.mock_series(endpoint, symbol, period, limit)
@@ -130,8 +146,12 @@ def _fetch_series(endpoint: str, symbol: str, period: str,
     fn = getattr(client, _SERIES_ENDPOINTS[endpoint])
     try:
         data = _binance_sdk.sync_call_with_rate_limit(
-            fn, symbol=symbol, period=period, limit=limit,
-            name=endpoint, weight=1,
+            fn,
+            symbol=symbol,
+            period=period,
+            limit=limit,
+            name=endpoint,
+            weight=1,
         )
     except Exception:
         return None
@@ -140,32 +160,37 @@ def _fetch_series(endpoint: str, symbol: str, period: str,
     return [_map_series_row(endpoint, row, symbol) for row in data]
 
 
-def fetch_open_interest_hist(symbol: str, period: str = "1h",
-                             limit: int = 48) -> list[dict] | None:
+def fetch_open_interest_hist(
+    symbol: str, period: str = "1h", limit: int = 48
+) -> list[dict] | None:
     """Open Interest 历史（openInterestHist）。"""
     return _fetch_series("open_interest_hist", symbol, period, limit)
 
 
-def fetch_global_long_short_ratio(symbol: str, period: str = "1h",
-                                  limit: int = 48) -> list[dict] | None:
+def fetch_global_long_short_ratio(
+    symbol: str, period: str = "1h", limit: int = 48
+) -> list[dict] | None:
     """全市场多空账户比（globalLongShortAccountRatio）。"""
     return _fetch_series("global_long_short", symbol, period, limit)
 
 
-def fetch_top_long_short_account_ratio(symbol: str, period: str = "1h",
-                                       limit: int = 48) -> list[dict] | None:
+def fetch_top_long_short_account_ratio(
+    symbol: str, period: str = "1h", limit: int = 48
+) -> list[dict] | None:
     """大户多空账户比（topLongShortAccountRatio）。"""
     return _fetch_series("top_ls_accounts", symbol, period, limit)
 
 
-def fetch_top_long_short_position_ratio(symbol: str, period: str = "1h",
-                                        limit: int = 48) -> list[dict] | None:
+def fetch_top_long_short_position_ratio(
+    symbol: str, period: str = "1h", limit: int = 48
+) -> list[dict] | None:
     """大户多空持仓比（topLongShortPositionRatio）。"""
     return _fetch_series("top_ls_positions", symbol, period, limit)
 
 
-def fetch_taker_long_short_ratio(symbol: str, period: str = "1h",
-                                 limit: int = 48) -> list[dict] | None:
+def fetch_taker_long_short_ratio(
+    symbol: str, period: str = "1h", limit: int = 48
+) -> list[dict] | None:
     """官方 taker 买卖比（takerlongshortRatio）。"""
     return _fetch_series("taker_bs", symbol, period, limit)
 
@@ -209,3 +234,107 @@ def fetch_listing_days() -> dict[str, int] | None:
         except (TypeError, ValueError):
             continue
     return days
+
+
+def fetch_premium_index_all() -> list[dict] | None:
+    """全量 premiumIndex（fapi/v1/premiumIndex 无 symbol，权重 1，批内一次）。
+
+    返回 ``[{symbol, mark_price, index_price, last_funding_rate,
+    next_funding_time}]``（数值化）；失败返回 ``None``。
+    """
+    if env.is_mock_mode():
+        return mock.mock_premium_index_all()
+    client = _binance_sdk.get_futures_data_client()
+    try:
+        data = _binance_sdk.sync_call_with_rate_limit(
+            client.mark_price, name="premiumIndex(all)", weight=1
+        )
+    except Exception:
+        return None
+    if not isinstance(data, list):
+        return None
+    rows: list[dict] = []
+    for p in data:
+        try:
+            rows.append(
+                {
+                    "symbol": p["symbol"],
+                    "mark_price": _float_or_none(p.get("markPrice")),
+                    "index_price": _float_or_none(p.get("indexPrice")),
+                    "last_funding_rate": _float_or_none(p.get("lastFundingRate")),
+                    "next_funding_time": _int_or_none(p.get("nextFundingTime")),
+                }
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    return rows
+
+
+def fetch_fapi_prices_all() -> dict[str, float] | None:
+    """全量合约价格：``{symbol: price}``（fapi/v1/ticker/price，权重 2）。"""
+    if env.is_mock_mode():
+        return mock.mock_fapi_prices_all()
+    client = _binance_sdk.get_futures_data_client()
+    try:
+        data = _binance_sdk.sync_call_with_rate_limit(
+            client.symbol_price_ticker, name="ticker/price(fapi)", weight=2
+        )
+    except Exception:
+        return None
+    if not isinstance(data, list):
+        return None
+    prices: dict[str, float] = {}
+    for p in data:
+        price = _float_or_none(p.get("price"))
+        symbol = p.get("symbol")
+        if symbol and price is not None:
+            prices[symbol] = price
+    return prices
+
+
+def fetch_funding_rate_history(symbol: str, limit: int = 25) -> list[dict] | None:
+    """资金费率历史（fapi/v1/fundingRate，权重 1）：
+    ``[{funding_time, funding_rate}]`` 时间升序。"""
+    if env.is_mock_mode():
+        return mock.mock_funding_rate_history(symbol, limit)
+    client = _binance_sdk.get_futures_data_client()
+    try:
+        data = _binance_sdk.sync_call_with_rate_limit(
+            client.get_funding_rate_history,
+            symbol=symbol,
+            limit=limit,
+            name="fundingRate",
+            weight=1,
+        )
+    except Exception:
+        return None
+    if not isinstance(data, list):
+        return None
+    rows: list[dict] = []
+    for f in data:
+        rate = _float_or_none(f.get("fundingRate"))
+        f_time = _int_or_none(f.get("fundingTime"))
+        if rate is None or f_time is None:
+            continue
+        rows.append({"funding_time": f_time, "funding_rate": rate})
+    return rows
+
+
+def fetch_open_interest(symbol: str) -> dict | None:
+    """当前合约持仓量（fapi/v1/openInterest，权重 1）：
+    ``{symbol, open_interest}``。"""
+    if env.is_mock_mode():
+        return mock.mock_open_interest(symbol)
+    client = _binance_sdk.get_futures_data_client()
+    try:
+        data = _binance_sdk.sync_call_with_rate_limit(
+            client.open_interest, symbol=symbol, name="openInterest", weight=1
+        )
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    return {
+        "symbol": data.get("symbol", symbol),
+        "open_interest": _float_or_none(data.get("openInterest")),
+    }
