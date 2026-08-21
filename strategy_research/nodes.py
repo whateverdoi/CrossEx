@@ -584,7 +584,7 @@ def _signal_lines(symbol: str, state: dict) -> list[str]:
             (
                 f"divergence_7d={_num_text(div.get('divergence_7d'))}",
                 f"divergence_30d={_num_text(div.get('divergence_30d'))}",
-                f"quadrant={div.get('quadrant') or 'None'}",
+                f"quadrant={div.get('quadrant') or 'UNKNOWN'}",
             )
         )
     )
@@ -592,7 +592,9 @@ def _signal_lines(symbol: str, state: dict) -> list[str]:
     if sent:
         lines.append(
             "sentiment: "
-            + " ".join(f"{k}={v if v is not None else 'None'}" for k, v in sent.items())
+            + " ".join(
+                f"{k}={v if v is not None else 'UNKNOWN'}" for k, v in sent.items()
+            )
         )
     else:
         lines.append("sentiment: UNKNOWN")

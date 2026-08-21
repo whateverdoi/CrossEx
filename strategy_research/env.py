@@ -64,7 +64,8 @@ def get_llm(
     按 prompt 特征路由固定 JSON 响应，真实/假模型产出同构，全链代码路径一致。
     """
     if os.environ.get(MOCK_ENV) == "1":
-        # responses 仅占位（_generate 按输入路由，不消费列表）
+        # responses 仅占位（_generate 按输入路由，不消费列表）；temperature 同步传入
+        # 但假模型不消费（确定性输出，温度无意义），仅保持调用面一致
         return _MockChatModel(
             responses=[AIMessage(content="")], temperature=temperature
         )

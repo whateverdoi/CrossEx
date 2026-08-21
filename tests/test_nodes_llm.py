@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from strategy_research import env, nodes
+from strategy_research import env, nodes, schemas
 from strategy_research.graph import build_graph
 from strategy_research.schemas import TokenAnalysis
 
@@ -36,14 +36,20 @@ def _reset_counts() -> None:
 
 @pytest.fixture(scope="module")
 def full_result():
-    """mock 全链一次（6 token），供多个验收断言复用。"""
+    """mock 全链一次（6 token）+ 调用计数快照，供多个验收断言复用。
+
+    返回计数快照而非实时 dict：断言不依赖测试执行顺序（后续测试若再触发
+    LLM 调用也不会污染本批计数断言）。
+    """
     _reset_counts()
-    return build_graph().invoke({"tokens": MOCK_TOKENS, "meta": {}})
+    result = build_graph().invoke({"tokens": MOCK_TOKENS, "meta": {}})
+    return result, dict(env._MOCK_CALL_COUNTS)
 
 
 def test_mock_facts_nonempty_with_dimension_topic(full_result):
     """mock 模式产出非空 facts；每条含 dimension/topic 且 source 在白名单。"""
-    facts = full_result["facts"]
+    result, _ = full_result
+    facts = result["facts"]
     for s in MOCK_TOKENS:
         assert facts[s], f"{s} facts 为空（验收：mock 非空）"
         for f in facts[s]:
@@ -56,8 +62,9 @@ def test_mock_facts_nonempty_with_dimension_topic(full_result):
 
 def test_mock_decide_fields_match_tokenanalysis(full_result):
     """decide 字段与 TokenAnalysis 一致；TRADE 必含 direction（验收）。"""
+    result, _ = full_result
     for s in MOCK_TOKENS:
-        d = full_result["decisions"][s]
+        d = result["decisions"][s]
         assert TokenAnalysis.model_validate(d).model_dump() == d
         if d["decision"] == "TRADE":
             assert d["direction"] in ("long", "short")
@@ -66,26 +73,35 @@ def test_mock_decide_fields_match_tokenanalysis(full_result):
 
 def test_mock_pass_path_zero_llm_calls(full_result):
     """PASS 路径 ③+④ 共 2 次；⑤⑥ 只对非 PASS（BTC/ETH/SOL）调用（验收）。"""
-    c = env._MOCK_CALL_COUNTS
-    assert c["facts"] == 6
-    assert c["decide"] == 6
-    assert c["challenge"] == 3  # BTC/ETH/SOL 非 PASS
-    assert c["rebuttals"] == 3
+    result, counts = full_result
+    assert counts["facts"] == 6
+    assert counts["decide"] == 6
+    assert counts["challenge"] == 3  # BTC/ETH/SOL 非 PASS
+    assert counts["rebuttals"] == 3
     # 透传产物：PASS token 无挑战、无复审回应
     for s in ("UNI", "DOGE", "XRP"):
-        assert full_result["challenges"][s] == []
-        assert full_result["final_decisions"][s]["rebuttals"] == []
+        assert result["challenges"][s] == []
+        assert result["final_decisions"][s]["rebuttals"] == []
 
 
 def test_mock_challenge_max3_with_stance(full_result):
     """非 PASS 挑战 ≤3 条，含 claim/evidence/severity/stance。"""
+    result, _ = full_result
     for s in ("BTC", "ETH", "SOL"):
-        chs = full_result["challenges"][s]
+        chs = result["challenges"][s]
         assert 0 < len(chs) <= 3
         for c in chs:
             assert c["claim"] and c["evidence"]
             assert c["severity"] in _SEVERITIES
             assert c["stance"] in _STANCES
+
+
+def test_mock_routing_keys_linked_to_prompts():
+    """mock 路由关键词与 prompt 措辞绑定：断链即红（防措辞漂移致路由失效）。"""
+    assert "事实收集员" in schemas.FACTS_PROMPT  # → facts
+    assert "策略研究员" in schemas.DECIDE_PROMPT  # → decide（else 分支）
+    assert "对抗官" in schemas.CHALLENGE_PROMPT  # → challenge
+    assert "复审员" in schemas.FINALIZE_PROMPT  # → rebuttals
 
 
 _MIXED_FACTS = [
