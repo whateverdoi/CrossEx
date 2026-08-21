@@ -965,7 +965,8 @@ def _ev_flags(symbol: str, analysis: dict, state: dict) -> list[str]:
     """
     side = analysis.get("direction")
     sig = (state.get("signals") or {}).get(symbol) or {}
-    if not sig:
+    # 键缺失或信号层失败（05 票 error 条目）→ 跳过核验：缺数据不等于矛盾，不误伤
+    if not sig or sig.get("error"):
         return []
     mom = (sig.get("momentum") or {}).get("value")
     quad = ((sig.get("divergence") or {}).get("value") or {}).get("quadrant")

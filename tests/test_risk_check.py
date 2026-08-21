@@ -151,6 +151,17 @@ def test_signals_missing_skips_ev():
     assert out["results"][0]["decision"] == "TRADE"
 
 
+def test_signals_error_entry_skips_ev():
+    """失败矩阵边界：signals 为错误条目（信号层失败）→ EV 跳过，不误判矛盾。"""
+    state = _mk_state(
+        {"BTC": _trade("BTC", "long")},
+        {"BTC": {"symbol": "BTC", "error": "信号计算失败"}},
+    )
+    out = nodes.risk_check(state)
+    assert out["risk_flags"]["BTC"] == []
+    assert out["results"][0]["decision"] == "TRADE"
+
+
 def test_concentration_applies_without_signals():
     """集中度核验不依赖 signals：3 TRADE 无 signals → 仅集中度降级。"""
     state = _mk_state(

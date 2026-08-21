@@ -24,7 +24,7 @@
 3. **降级只降不升**：有 flag 的 TRADE → `decision="WATCH"` + `downgraded=flags`；confidence/trade_structure 等其余字段不动（风控不改写 LLM 数值）；PASS/WATCH 不参与核验。
 4. **results 派生**（与规格 ⑦ 伪代码一致）：`{**analysis, "rebuttals", "risk_flags"}`，降级后 decision 已改写，`downgraded` 字段带出。
 5. **复制不原地改**：`analysis = dict(item["analysis"])` 后改写，`final_decisions` 入参保持原状（纯函数纪律）。
-6. **spec 失败矩阵落地**：`signals[symbol]` 缺失 → EV 核验跳过（缺数据不等于矛盾，不误伤），集中度仍照常核验。
+6. **spec 失败矩阵落地**：`signals[symbol]` 缺失 → EV 核验跳过（缺数据不等于矛盾，不误伤），集中度仍照常核验；**补修（code-review）**：信号层失败 error 条目（05 票 `{"symbol", "error"}` 产物）同样跳过——实现与伪代码一致但未覆盖错误条目边界，已按“缺数据不等于矛盾”语义修复并补单测。
 
 ## 偏差裁决（以根规格 ⑦ 为准）
 
