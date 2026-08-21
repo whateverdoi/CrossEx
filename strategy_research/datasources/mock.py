@@ -221,6 +221,51 @@ def mock_protocol_fees(protocol: str) -> dict:
     return {"fees_24h": 10.0, "fees_7d": 70.0, "revenue_24h": 5.0, "revenue_7d": 35.0}
 
 
+def mock_protocol_tvl_history(protocol: str, days: int = 90) -> list[dict]:
+    """协议 TVL 历史序列 mock（每日）：``[{date, tvl}]``。
+
+    与 mock_protocol_tvl 同构：最新值 = 当前 tvl，且 7d/30d 复合变化率
+    精确等于 tvl_change_7d/30d（分段指数构造，工具层降采样后可回算）；
+    时间升序（最新在末尾，与真实 API 同向）。
+    """
+    latest = 1000.0 + len(protocol)
+    v7 = latest / 1.025  # 7 天前（+2.5% 复合）
+    v30 = latest / 1.10  # 30 天前（+10% 复合）
+    rate2 = (v7 / v30) ** (1.0 / 23.0)  # 第 8..30 天衔接速率
+    out = []
+    for x in range(days - 1, -1, -1):  # x=0 为最新一天（末尾）
+        if x <= 7:
+            v = latest / (1.025 ** (x / 7.0))
+        elif x <= 30:
+            v = v7 / (rate2 ** (x - 7))
+        else:
+            v = v30 / (rate2 ** (x - 30))
+        out.append({"date": _iso_days_ago(x), "tvl": round(v, 2)})
+    return out
+
+
+def mock_protocol_fees_history(protocol: str, days: int = 90) -> list[dict]:
+    """协议费用历史序列 mock（每日）：``[{date, fees, revenue}]``。
+
+    与 mock_protocol_fees 同构：最新值 = 当前 fees_24h/revenue_24h；
+    恒定序列（mock 费用无变化率字段，趋势 flat）；时间升序（最新在末尾）。
+    """
+    return [
+        {"date": _iso_days_ago(x), "fees": 10.0, "revenue": 5.0}
+        for x in range(days - 1, -1, -1)
+    ]
+
+
+def mock_stablecoin_history(chain: str, days: int = 90) -> list[dict]:
+    """链稳定币总量历史序列 mock（每日）：``[{date, supply}]``。
+
+    与 mock_stablecoin_supply 同构：最新值 = 当前供应量；时间升序（最新在末尾）。
+    """
+    return [
+        {"date": _iso_days_ago(x), "supply": 1.5e9} for x in range(days - 1, -1, -1)
+    ]
+
+
 def mock_stablecoin_supply(chain: str) -> dict:
     return {"stablecoin_supply": 1.5e9, "incomplete": False}
 
@@ -303,6 +348,7 @@ def mock_web_rss(query: str) -> list[dict]:
             "date": _iso_days_ago(i),
             "source": "Mock Web",
             "link": f"https://mock.example/web/{query}/{i}",
+            "description": f"{query} 网页 {i} 的摘要内容",
         }
         for i in range(3)
     ]

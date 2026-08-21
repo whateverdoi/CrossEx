@@ -237,6 +237,97 @@ def test_fetch_chain_tvl_mock() -> None:
     assert isinstance(row["tvl"], float)
 
 
+# ── 历史序列（06 票：工具层数据源）──────────────────────
+
+
+def test_fetch_protocol_tvl_history_mock_consistent() -> None:
+    """mock 历史与当前快照同构：时间升序（最新在末尾）、最新值 == tvl、
+    7d/30d 复合变化率回算 == tvl_change 字段（工具层可回算趋势）。"""
+    rows = defillama.fetch_protocol_tvl_history("uniswap")
+    assert rows is not None and len(rows) == 90
+    latest = rows[-1]["tvl"]
+    assert latest == pytest.approx(defillama.fetch_protocol_tvl("uniswap")["tvl"])
+    assert (latest / rows[-8]["tvl"] - 1) * 100 == pytest.approx(2.5, abs=0.01)
+    assert (latest / rows[-31]["tvl"] - 1) * 100 == pytest.approx(10.0, abs=0.01)
+
+
+def test_fetch_protocol_fees_history_mock_consistent() -> None:
+    """mock 费用历史：最新值 == 当前 fees_24h/revenue_24h。"""
+    rows = defillama.fetch_protocol_fees_history("uniswap")
+    assert rows is not None
+    assert rows[-1]["fees"] == pytest.approx(10.0)
+    assert rows[-1]["revenue"] == pytest.approx(5.0)
+
+
+def test_fetch_stablecoin_history_mock_consistent() -> None:
+    """mock 稳定币历史：最新值 == 当前供应量。"""
+    rows = defillama.fetch_stablecoin_history("ethereum")
+    assert rows is not None
+    assert rows[-1]["supply"] == pytest.approx(1.5e9)
+
+
+TVL_HIST_JSON = {
+    "tvl": [
+        {"date": 1700000000, "totalLiquidityUSD": 100.0},
+        {"date": 1700086400, "totalLiquidityUSD": 110.5},
+    ]
+}
+
+
+def test_fetch_protocol_tvl_history_parses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """真实路径：/protocol/{slug} 的 tvl 数组 → [{date, tvl}]（顺序保留）。"""
+    monkeypatch.setenv("SR_MOCK", "0")
+    client = _client(TVL_HIST_JSON)
+    rows = defillama.fetch_protocol_tvl_history("uniswap", client=client)
+    assert rows == [
+        {"date": 1700000000, "tvl": 100.0},
+        {"date": 1700086400, "tvl": 110.5},
+    ]
+
+
+FEES_HIST_JSON = [
+    {"date": 1700000000, "fees": 10.0, "revenue": 5.0},
+    {"date": 1700086400, "fees": None, "revenue": 6.0},
+]
+
+
+def test_fetch_protocol_fees_history_parses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """真实路径：fees 数组 → [{date, fees, revenue}]；单字段缺失保留。"""
+    monkeypatch.setenv("SR_MOCK", "0")
+    client = _client(FEES_HIST_JSON)
+    rows = defillama.fetch_protocol_fees_history("uniswap", client=client)
+    assert rows == [
+        {"date": 1700000000, "fees": 10.0, "revenue": 5.0},
+        {"date": 1700086400, "fees": None, "revenue": 6.0},
+    ]
+
+
+SC_HIST_JSON = [
+    {"date": 1700000000, "totalCirculatingUSD": {"usdt": 100.0, "usdc": None}},
+    {"date": 1700086400, "totalCirculatingUSD": {"usdt": 110.0}},
+]
+
+
+def test_fetch_stablecoin_history_parses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """真实路径：stablecoincharts → [{date, supply}]；缺失币种跳过。"""
+    monkeypatch.setenv("SR_MOCK", "0")
+    client = _client(SC_HIST_JSON)
+    rows = defillama.fetch_stablecoin_history("ethereum", client=client)
+    assert rows == [
+        {"date": 1700000000, "supply": 100.0},
+        {"date": 1700086400, "supply": 110.0},
+    ]
+
+
+def test_fetch_history_failure_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """历史序列失败即失败：网络异常 → None（工具层转 UNKNOWN 文本）。"""
+    monkeypatch.setenv("SR_MOCK", "0")
+    client = _client_raise(httpx.ConnectError("refused"))
+    assert defillama.fetch_protocol_tvl_history("uniswap", client=client) is None
+    assert defillama.fetch_protocol_fees_history("uniswap", client=client) is None
+    assert defillama.fetch_stablecoin_history("ethereum", client=client) is None
+
+
 def test_fetch_chains_real_parses(monkeypatch: pytest.MonkeyPatch) -> None:
     """/v2/chains → {链名小写: {tvl, token_symbol}}；缺失字段跳过。"""
     monkeypatch.setenv("SR_MOCK", "0")

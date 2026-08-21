@@ -2,10 +2,11 @@
 
 - ``fetch_news_rss``：https://www.bing.com/news/search?q={q}&format=rss
 - ``fetch_web_rss``：https://www.bing.com/search?q={q}&format=rss（同族）
+- ``search_web``：工具层通用搜索（同上端点，返回 {title, url, snippet}）
 
-条目字段：``{title, date, source, link}``；date 统一转 ISO 8601（RFC822
-原文不可解析时置 None）。失败返回 ``None``（装配层标 UNKNOWN，失败即失败
-不回退 mock）。测试可注入 ``httpx.Client``（MockTransport）零外部请求。
+条目字段：``{title, date, source, link, description}``；date 统一转 ISO 8601
+（RFC822 原文不可解析时置 None）。失败返回 ``None``（装配层标 UNKNOWN，失败
+即失败不回退 mock）。测试可注入 ``httpx.Client``（MockTransport）零外部请求。
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from . import mock
 
 NEWS_URL = "https://www.bing.com/news/search"
 WEB_URL = "https://www.bing.com/search"
+MAX_WEB_ITEMS = 5
 TIMEOUT_SECONDS = 15.0
 
 _client: httpx.Client | None = None
@@ -88,6 +90,7 @@ def _parse_rss(xml_text: str) -> list[dict]:
                 "date": date,
                 "source": source,
                 "link": text(item, "link"),
+                "description": text(item, "description"),
             }
         )
     return items
@@ -122,3 +125,29 @@ def fetch_web_rss(
     if env.is_mock_mode():
         return mock.mock_web_rss(query)[:limit]
     return _fetch_rss(WEB_URL, query, limit, client)
+
+
+def search_web(
+    query: str, max_items: int = MAX_WEB_ITEMS, client: httpx.Client | None = None
+) -> list[dict] | None:
+    """通用 web 搜索（零 key）：返回 ``{title, url, snippet, source: "bing_web"}``。
+
+    失败返回 None（agent 视为数据不可用，不抛异常）；无结果返回空列表；
+    与 search_news 同一容错纪律：不重试，失败返回 None（调用方按 UNKNOWN
+    处理，绝不回退 mock）。
+    """
+    if env.is_mock_mode():
+        rows = mock.mock_web_rss(query)[:max_items]
+    else:
+        rows = _fetch_rss(WEB_URL, query, max_items, client)
+    if rows is None:
+        return None
+    return [
+        {
+            "title": r.get("title"),
+            "url": r.get("link"),
+            "snippet": r.get("description"),
+            "source": "bing_web",
+        }
+        for r in rows
+    ]

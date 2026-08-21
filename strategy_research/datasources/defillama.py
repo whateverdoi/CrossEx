@@ -163,6 +163,57 @@ def fetch_protocol_fees(
     }
 
 
+def fetch_protocol_tvl_history(
+    protocol: str, client: httpx.Client | None = None
+) -> list[dict] | None:
+    """协议 TVL 历史序列（每日）：``[{date, tvl}]``；失败/空 → None。
+
+    与 fetch_protocol_tvl 同一端点，供 ③/⑤ 历史序列工具（降采样在工具层）。
+    """
+    if env.is_mock_mode():
+        return mock.mock_protocol_tvl_history(protocol)
+    try:
+        data = _fetch_json(f"{BASE_URL}/protocol/{protocol}", client=client)
+    except Exception:
+        return None
+    rows = data.get("tvl") if isinstance(data, dict) else None
+    if not isinstance(rows, list):
+        return None
+    out = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        tvl = _float_or_none(r.get("totalLiquidityUSD"))
+        if tvl is None:
+            continue
+        out.append({"date": r.get("date"), "tvl": tvl})
+    return out or None
+
+
+def fetch_protocol_fees_history(
+    protocol: str, client: httpx.Client | None = None
+) -> list[dict] | None:
+    """协议费用历史序列（每日）：``[{date, fees, revenue}]``；失败/空 → None。"""
+    if env.is_mock_mode():
+        return mock.mock_protocol_fees_history(protocol)
+    try:
+        data = _fetch_json(f"{BASE_URL}/protocols/{protocol}/fees", client=client)
+    except Exception:
+        return None
+    if not isinstance(data, list):
+        return None
+    out = []
+    for r in data:
+        if not isinstance(r, dict):
+            continue
+        fees = _float_or_none(r.get("fees"))
+        revenue = _float_or_none(r.get("revenue"))
+        if fees is None and revenue is None:
+            continue
+        out.append({"date": r.get("date"), "fees": fees, "revenue": revenue})
+    return out or None
+
+
 def fetch_stablecoin_supply(
     chain: str, client: httpx.Client | None = None
 ) -> dict | None:
@@ -188,6 +239,35 @@ def fetch_stablecoin_supply(
     if not known:
         return None
     return {"stablecoin_supply": sum(known), "incomplete": len(known) < len(values)}
+
+
+def fetch_stablecoin_history(
+    chain: str, client: httpx.Client | None = None
+) -> list[dict] | None:
+    """链稳定币总量历史序列（每日）：``[{date, supply}]``；失败/空 → None。
+
+    与 fetch_stablecoin_supply 同一端点（stablecoincharts 本身是历史序列）。
+    """
+    if env.is_mock_mode():
+        return mock.mock_stablecoin_history(chain)
+    try:
+        data = _fetch_json(f"{STABLECOINS_URL}/stablecoincharts/{chain}", client=client)
+    except Exception:
+        return None
+    if not isinstance(data, list):
+        return None
+    out = []
+    for r in data:
+        if not isinstance(r, dict):
+            continue
+        usd = r.get("totalCirculatingUSD")
+        if not isinstance(usd, dict):
+            continue
+        known = [v for v in (_float_or_none(x) for x in usd.values()) if v is not None]
+        if not known:
+            continue
+        out.append({"date": r.get("date"), "supply": sum(known)})
+    return out or None
 
 
 def fetch_dex_volume_24h(

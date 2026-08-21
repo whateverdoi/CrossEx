@@ -107,6 +107,42 @@ def test_fetch_web_rss_uses_search_endpoint(monkeypatch: pytest.MonkeyPatch) -> 
     assert "/search?" in captured["url"]
 
 
+def test_search_web_real_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    """search_web 真实路径：{title, url, snippet, source: bing_web}，
+    snippet 来自 description 字段。"""
+    monkeypatch.setenv("SR_MOCK", "0")
+    xml = RSS_XML.replace(
+        "<link>https://example.com/1</link>",
+        "<description>BTC 摘要内容</description><link>https://example.com/1</link>",
+    )
+    client = httpx.Client(
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, text=xml))
+    )
+    items = web.search_web("BTC", client=client)
+    assert items is not None and len(items) == 2
+    assert set(items[0]) == {"title", "url", "snippet", "source"}
+    assert items[0]["source"] == "bing_web"
+    assert items[0]["url"] == "https://example.com/1"
+    assert items[0]["snippet"] == "BTC 摘要内容"
+    assert items[1]["snippet"] is None  # RSS_XML 无 description
+
+
+def test_search_web_mock_shape() -> None:
+    """search_web mock 分支：字段与真实同构。"""
+    items = web.search_web("BTC")
+    assert items is not None and len(items) > 0
+    assert set(items[0]) == {"title", "url", "snippet", "source"}
+    assert items[0]["source"] == "bing_web"
+    assert isinstance(items[0]["snippet"], str)
+
+
+def test_search_web_failure_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """search_web 失败 → None（工具层转 UNKNOWN 文本，不重试）。"""
+    monkeypatch.setenv("SR_MOCK", "0")
+    client = _client_raise(httpx.ConnectError("refused"))
+    assert web.search_web("BTC", client=client) is None
+
+
 def test_fetch_failure_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
     """失败即失败：网络异常 → None（装配层标 UNKNOWN）。"""
     monkeypatch.setenv("SR_MOCK", "0")
