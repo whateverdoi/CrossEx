@@ -1024,19 +1024,19 @@ def risk_check(state: dict) -> dict:
 
 
 def write_report(state: dict) -> dict:
-    """⑧ 报告落盘：overview.md + run.json（+ snapshot/diff 09-10 票）。"""
+    """⑧ 报告落盘：overview.md + run.json + candidates.json + snapshot/diff（09-10 票）。"""
     from strategy_research.report import build_report
 
     meta, order = _meta(state)
     order.append("write_report")
     meta["node_order"] = order
     try:
-        report_path = build_report(state, meta)
+        report_path, artifacts = build_report(state, meta)
         meta["report_path"] = str(report_path)
     except Exception as exc:  # 规格：落盘异常仅记 meta，不中断批（六节错误矩阵 ⑧）
+        artifacts = {s: {} for s in state["tokens"]}
         meta["report_error"] = f"报告落盘失败: {exc}"
     return {
         "meta": meta,
-        "research_artifacts": state.get("research_artifacts")
-        or {s: {} for s in state["tokens"]},
+        "research_artifacts": artifacts,
     }
