@@ -118,6 +118,12 @@ def test_stablecoin_history_mock_success() -> None:
     assert _points(text) <= 10
 
 
+def test_stablecoin_history_protocol_token_no_data() -> None:
+    """协议类 token（非链）：mock/真实一致地返回无数据（不模拟不存在的数据）。"""
+    text = t.get_stablecoin_history.invoke({"symbol": "UNI"})
+    assert "无稳定币数据" in text
+
+
 # ── search_web ───────────────────────────────────────────
 
 

@@ -121,12 +121,16 @@ def mock_fapi_prices_all() -> dict[str, float]:
 
 
 def mock_funding_rate_history(symbol: str, limit: int = 25) -> list[dict]:
-    """资金费率历史（与 fetch_funding_rate_history 同构）。"""
+    """资金费率历史（与 fetch_funding_rate_history 同构）：时间升序，最新在末尾。
+
+    费率图案随时间序反转（最新费率 = 0.0001，随序号周期性上升）——
+    signals 的 funding_trend 按首尾比较，序列升序后图案不同步反转会翻转趋势。
+    """
     now = _now_ms()
     return [
         {
-            "funding_time": now - i * 8 * 3_600_000,
-            "funding_rate": 0.0001 * (1 + (i % 5) * 0.1),
+            "funding_time": now - (limit - 1 - i) * 8 * 3_600_000,
+            "funding_rate": 0.0001 * (1 + ((limit - 1 - i) % 5) * 0.1),
         }
         for i in range(max(1, limit))
     ]
@@ -256,11 +260,19 @@ def mock_protocol_fees_history(protocol: str, days: int = 90) -> list[dict]:
     ]
 
 
-def mock_stablecoin_history(chain: str, days: int = 90) -> list[dict]:
+#: 已知链名（与 defillama.TOKEN_SLUG_MAP ``chain:`` 值一致；未知链返回
+#: None 与真实路径同构——不模拟不存在的数据）
+_MOCK_KNOWN_CHAINS = {"bitcoin", "ethereum", "solana", "doge", "avalanche", "cardano"}
+
+
+def mock_stablecoin_history(chain: str, days: int = 90) -> list[dict] | None:
     """链稳定币总量历史序列 mock（每日）：``[{date, supply}]``。
 
-    与 mock_stablecoin_supply 同构：最新值 = 当前供应量；时间升序（最新在末尾）。
+    与 mock_stablecoin_supply 同构：最新值 = 当前供应量；时间升序（最新在末尾）；
+    未知链返回 None（与真实路径一致，不模拟不存在的数据）。
     """
+    if chain not in _MOCK_KNOWN_CHAINS:
+        return None
     return [
         {"date": _iso_days_ago(x), "supply": 1.5e9} for x in range(days - 1, -1, -1)
     ]

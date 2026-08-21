@@ -13,11 +13,13 @@
 - [x] `tools.py` 注册表：`FACTS_TOOLS` 5 个（get_tvl_history / get_fees_history / get_funding_history / get_stablecoin_history + search_web 六维查询模板）/ `CHALLENGE_TOOLS` 4 个（**不含 search_web**，对抗者不给联网搜索）；降采样 ≤10 点
 - [x] 工具单测：成功 / 无结果 / 失败 3 种返回；**工具层永不抛异常**
 - [x] `_extract_json`：宽容解析（代码块包裹 / 前后杂质 / 部分损坏容错）
-- [x] DeepSeek json_mode 冒烟：`response_format=json_object` 通道可用（langchain 适配 deepseek 验证）
+- [x] DeepSeek json_mode 冒烟：`response_format=json_object` 通道可用（langchain_deepseek 官方集成包验证）
 
 ## 实现说明
 
-**文件**：新建 `schemas.py`（4 schema + validator + 5 prompt 常量 + `_extract_json`）、`tools.py`（注册表）；修改 `env.py`（get_llm）、`web.py`（`_parse_rss` 加 description + `search_web`）、`defillama.py`（3 个历史序列 fetch）、`mock.py`（3 个历史序列 mock）；测试 `test_schemas`（21 项）/ `test_tools`（16 项）/ `test_web` 追加 4 项 / `test_defillama` 追加 7 项。
+**文件**：新建 `schemas.py`（4 schema + validator + 5 prompt 常量 + `_extract_json`）、`tools.py`（注册表）；修改 `env.py`（get_llm）、`web.py`（`_parse_rss` 加 description + `search_web`）、`defillama.py`（3 个历史序列 fetch）、`mock.py`（3 个历史序列 mock）；测试 `test_schemas`（24 项）/ `test_tools`（15 项）/ `test_web` 追加 3 项 / `test_defillama` 追加 7 项。
+
+**get_llm（用户反馈后改用官方集成）**：`env.get_llm` 用 `langchain_deepseek.ChatDeepSeek` 官方包——api_key 自动读 `DEEPSEEK_API_KEY`、api_base 自动读 `DEEPSEEK_API_BASE`（默认官方端点）、model 默认 deepseek-chat 可被 `DEEPSEEK_MODEL` 覆盖；代码零 url/模型名常量（不手写 OpenAI 适配层）。代价：默认端点无 key 时官方包拒绝构造（ValueError），mock 链路不经过本函数；冒烟用 `DEEPSEEK_API_KEY=sk-` 占位构造。
 
 **宽容 validator 设计**：每个 schema 一个 `model_validator(mode="before")` 全量清洗——`_text`（null/占位→""）、`_pick`（白名单大小写不敏感）、`_dimension`/`_topic`（中英变体映射表 `_DIMENSION_KEYS`/`_TOPIC_KEYS`）、`_float`（数字/数字字符串）、`_list`；`model_validate` 永不抛 ValidationError，坏条目丢弃在装配层（③ 伪代码）。`TokenAnalysis` 含 16 字段（ANALYZE_PROMPT 第 8 条清单），decision 非法置 PASS（保守）、direction 非法置空、confidence clamp 0-1、evidence 逐条 EvidenceItem。
 
@@ -27,10 +29,12 @@
 
 **历史序列数据源**：新增 `fetch_protocol_tvl_history`（/protocol/{slug} 的 tvl 数组）/ `fetch_protocol_fees_history`（/protocols/{slug}/fees）/ `fetch_stablecoin_history`（stablecoincharts 复用）——均为时间升序（最新在末尾，与 mock 同向），失败/空 → None。mock 同构强契约：TVL 历史用分段指数构造，最新值 == 当前 tvl 且 7d/30d 复合变化率精确等于 tvl_change 字段（工具层降采样后可回算趋势）；fees/stablecoin 恒定序列，最新值 == 当前值。
 
-**mock 顺序教训**：mock_protocol_tvl_history 初版最新在前（x=0 起始），与真实 API 时间升序相反——工具降采样取"最新在末尾"导致输出全为旧数据。修复为升序并用测试锁定（`rows[-1]` 最新 + 7d/30d 回算断言）。
+**mock 顺序教训**：mock_protocol_tvl_history 初版最新在前（x=0 起始），与真实 API 时间升序相反——工具降采样取"最新在末尾"导致输出全为旧数据。修复为升序并用测试锁定（`rows[-1]` 最新 + 7d/30d 回算断言）。code-review 发现 **funding mock 同款缺陷漏修**（初版 mock_funding_rate_history 最新在前），补修为升序并在 test_binance_futures 加顺序断言。
+
+**code-review 修复**：stablecoin 历史 mock 只对已知链（bitcoin/ethereum/solana/doge/avalanche/cardano，与 TOKEN_SLUG_MAP `chain:` 值一致）返回数据，未知链 None——协议类 token（UNI）mock/真实一致返回"无稳定币数据"（不模拟不存在的数据）；search_web 工具输出补 snippet（docstring 契约与行为对齐）；`_fmt_series` 加 decimals/ts 参数复用（funding 不再内联复制降采样）；web 数据源 source 统一 "bing"（与 schema 白名单同词，消除漂移）。
 
 **`_extract_json` 容错层级**：围栏剥离 → 只取第一个（最小下标）结构（外层不闭合**不回退**内层数组——facts 契约是对象，回退会让 `.get("facts")` 崩溃）→ 标准 loads → 单引号键修复 → 配对栈补全（`_missing_closers`：缺 `]` 和缺 `}` 分别补，字符串截断先补闭引号）→ 键值边界截断重试（≤32 次）。截断在非法值中间时恢复为 `{"facts": [{}]}` 骨架（装配层坏条目丢弃）。
 
-**冒烟**：mock 工具链 5 工具全通（含降采样 10 点、费率 6 位小数）；`get_llm()` 构造 + `with_structured_output(TokenAnalysis, method="json_mode").with_retry(stop_after_attempt=2)` 装配通过；无 DEEPSEEK_API_KEY，**真实 json_mode 调用待 key 后补验**（02 票同款先行方式）。
+**冒烟**：mock 工具链 5 工具全通（含降采样 10 点、费率 6 位小数）；`get_llm()`（ChatDeepSeek 官方包）+ `with_structured_output(TokenAnalysis, method="json_mode").with_retry(stop_after_attempt=2)` 装配通过；无真实 DEEPSEEK_API_KEY，**真实 json_mode 调用待 key 后补验**（02 票同款先行方式）。
 
-**验证**：178 passed（新增 48 项）+ ruff check/format 全绿。
+**验证**：178 passed（新增 49 项）+ ruff check/format 全绿。

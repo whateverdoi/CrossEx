@@ -79,15 +79,21 @@ def _value_str(value: object, decimals: int = 2) -> str:
         return str(value)
 
 
-def _fmt_series(rows: list[dict], keys: tuple[str, ...]) -> str:
-    """历史序列降采样 ≤10 点 → 文本行（每点 ``MM-DD: k1/k2``，含最新）。"""
+def _fmt_series(
+    rows: list[dict], keys: tuple[str, ...], decimals: int = 2, ts: bool = False
+) -> str:
+    """历史序列降采样 ≤10 点 → 文本行（每点 ``MM-DD: k1/k2``，含最新）。
+
+    decimals 用于费率等小数值（6 位保留 0.0001）；ts=True 时时间戳按毫秒格式化。
+    """
     step = max(1, len(rows) // _MAX_SERIES_POINTS)
     idxs = sorted({len(rows) - 1 - i * step for i in range(_MAX_SERIES_POINTS)})
     points = []
     for i in idxs:
         r = rows[i]
-        date = _fmt_date(r.get("date") or r.get("funding_time"))
-        vals = "/".join(_value_str(r.get(k)) for k in keys)
+        raw = r.get("date") or r.get("funding_time")
+        date = _fmt_ts(raw) if ts else _fmt_date(raw)
+        vals = "/".join(_value_str(r.get(k), decimals) for k in keys)
         points.append(f"{date}: {vals}")
     return "; ".join(points)
 
@@ -147,13 +153,9 @@ def get_funding_history(symbol: str) -> str:
         rows = None
     if not rows:
         return "无资金费率数据（该代币可能无 USDT 永续合约）"
-    step = max(1, len(rows) // _MAX_SERIES_POINTS)
-    idxs = sorted({len(rows) - 1 - i * step for i in range(_MAX_SERIES_POINTS)})
-    points = [
-        f"{_fmt_ts(rows[i].get('funding_time'))}: {_value_str(rows[i].get('funding_rate'), 6)}"
-        for i in idxs
-    ]
-    return "资金费率历史（MM-DD HH:MM: 费率）: " + "; ".join(points)
+    return "资金费率历史（MM-DD HH:MM: 费率）: " + _fmt_series(
+        rows, ("funding_rate",), decimals=6, ts=True
+    )
 
 
 @tool
@@ -198,7 +200,9 @@ def search_web(query: str) -> str:
         return "搜索不可用（UNKNOWN）"
     if not items:
         return "无搜索结果"
-    return "; ".join(f"{it['title']} - {it['url']}" for it in items)
+    return "; ".join(
+        f"{it['title']} - {it['url']}: {it['snippet'] or '无摘要'}" for it in items
+    )
 
 
 #: ③ research_facts 工具（5 个：4 历史序列 + search_web 六维查询模板）

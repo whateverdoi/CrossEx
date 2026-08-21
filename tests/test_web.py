@@ -108,7 +108,7 @@ def test_fetch_web_rss_uses_search_endpoint(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_search_web_real_shape(monkeypatch: pytest.MonkeyPatch) -> None:
-    """search_web 真实路径：{title, url, snippet, source: bing_web}，
+    """search_web 真实路径：{title, url, snippet, source: bing}，
     snippet 来自 description 字段。"""
     monkeypatch.setenv("SR_MOCK", "0")
     xml = RSS_XML.replace(
@@ -121,7 +121,7 @@ def test_search_web_real_shape(monkeypatch: pytest.MonkeyPatch) -> None:
     items = web.search_web("BTC", client=client)
     assert items is not None and len(items) == 2
     assert set(items[0]) == {"title", "url", "snippet", "source"}
-    assert items[0]["source"] == "bing_web"
+    assert items[0]["source"] == "bing"
     assert items[0]["url"] == "https://example.com/1"
     assert items[0]["snippet"] == "BTC 摘要内容"
     assert items[1]["snippet"] is None  # RSS_XML 无 description
@@ -132,7 +132,7 @@ def test_search_web_mock_shape() -> None:
     items = web.search_web("BTC")
     assert items is not None and len(items) > 0
     assert set(items[0]) == {"title", "url", "snippet", "source"}
-    assert items[0]["source"] == "bing_web"
+    assert items[0]["source"] == "bing"
     assert isinstance(items[0]["snippet"], str)
 
 

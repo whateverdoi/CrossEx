@@ -48,7 +48,7 @@ def _get_client() -> httpx.Client:
 
 
 def _parse_rss(xml_text: str) -> list[dict]:
-    """解析 RSS XML → ``[{title, date, source, link}]``。
+    """解析 RSS XML → ``[{title, date, source, link, description}]``。
 
     缺失字段置 None（UNKNOWN 纪律）；无标题条目丢弃；整段解析失败返回空列表。
     """
@@ -130,7 +130,7 @@ def fetch_web_rss(
 def search_web(
     query: str, max_items: int = MAX_WEB_ITEMS, client: httpx.Client | None = None
 ) -> list[dict] | None:
-    """通用 web 搜索（零 key）：返回 ``{title, url, snippet, source: "bing_web"}``。
+    """通用 web 搜索（零 key）：返回 ``{title, url, snippet, source: "bing"}``。
 
     失败返回 None（agent 视为数据不可用，不抛异常）；无结果返回空列表；
     与 search_news 同一容错纪律：不重试，失败返回 None（调用方按 UNKNOWN
@@ -147,7 +147,7 @@ def search_web(
             "title": r.get("title"),
             "url": r.get("link"),
             "snippet": r.get("description"),
-            "source": "bing_web",
+            "source": "bing",
         }
         for r in rows
     ]

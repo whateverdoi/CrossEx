@@ -241,6 +241,10 @@ def test_fetch_funding_rate_history_mock() -> None:
     assert set(rows[0]) == {"funding_time", "funding_rate"}
     assert isinstance(rows[0]["funding_time"], int)
     assert isinstance(rows[0]["funding_rate"], float)
+    # 时间升序（最新在末尾，与真实 API 同向）；间隔 8 小时
+    stamps = [r["funding_time"] for r in rows]
+    assert stamps == sorted(stamps)
+    assert stamps[-1] - stamps[-2] == 8 * 3_600_000
 
 
 def test_fetch_open_interest_mock() -> None:
