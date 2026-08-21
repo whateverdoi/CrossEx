@@ -956,25 +956,70 @@ def finalize(state: dict) -> dict:
     }
 
 
+def _ev_flags(symbol: str, analysis: dict, state: dict) -> list[str]:
+    """EV 边界核验（Conservative Analyst 视角）：TRADE 方向须与确定性信号一致。
+
+    多头：momentum.value >= 0 或 quadrant ∈ {I, III}；空头：momentum.value < 0 或
+    quadrant == II（IV 双弱无错价依据，不做空）；方向缺失即不满足。
+    signals[symbol] 缺失 → 跳过核验（规格失败矩阵：缺数据不等于矛盾，不误伤）。
+    """
+    side = analysis.get("direction")
+    sig = (state.get("signals") or {}).get(symbol) or {}
+    if not sig:
+        return []
+    mom = (sig.get("momentum") or {}).get("value")
+    quad = ((sig.get("divergence") or {}).get("value") or {}).get("quadrant")
+    if side == "long":
+        ok = (isinstance(mom, (int, float)) and mom >= 0) or quad in ("I", "III")
+    elif side == "short":
+        ok = (isinstance(mom, (int, float)) and mom < 0) or quad == "II"
+    else:
+        ok = False
+    if ok:
+        return []
+    side_text = {"long": "多头", "short": "空头"}.get(side, "未声明方向")
+    return [f"EV 不足: 动量/背离信号与{side_text}决策矛盾"]
+
+
 def risk_check(state: dict) -> dict:
-    """⑦ 风控终审（确定性）：EV 边界 + 集中度两条核验，只降不升。08 票完整实现。"""
+    """⑦ 风控终审（确定性）：EV 边界 + 组合集中度两条核验，只降不升（08 票）。
+
+    纯函数无 IO，LLM 无法覆盖降级。两遍扫描：先统计批内 TRADE 数，再逐 token
+    核验；有 flag 的 TRADE 降级 WATCH + downgraded 落分析对象（下游 results/报告
+    消费）。signals 缺失的 token 跳过 EV 核验（不误伤）；批处理永不中断。
+    """
     meta, order = _meta(state)
     order.append("risk_check")
     meta["node_order"] = order
     tokens = state["tokens"]
     finals = state.get("final_decisions", {})
-    return {
-        "risk_flags": {s: [] for s in tokens},
-        "results": [
+    trade_count = sum(
+        1
+        for s in tokens
+        if ((finals.get(s) or {}).get("analysis") or {}).get("decision") == "TRADE"
+    )
+    risk_flags: dict[str, list[str]] = {}
+    results: list[dict] = []
+    for symbol in tokens:
+        item = finals.get(symbol) or {}
+        analysis = dict(item.get("analysis") or {})
+        flags: list[str] = []
+        if analysis.get("decision") == "TRADE":
+            flags = _ev_flags(symbol, analysis, state)
+            if trade_count > 2:
+                flags.append(f"组合集中度超限: 批内 TRADE 数 = {trade_count}")
+            if flags:  # 终审降级（Portfolio Manager 裁决权）：只降不升
+                analysis["decision"] = "WATCH"
+                analysis["downgraded"] = flags
+        risk_flags[symbol] = flags
+        results.append(
             {
-                **((finals.get(s) or {}).get("analysis") or {}),
-                "rebuttals": (finals.get(s) or {}).get("rebuttals") or [],
-                "risk_flags": [],
+                **analysis,
+                "rebuttals": item.get("rebuttals") or [],
+                "risk_flags": flags,
             }
-            for s in tokens
-        ],
-        "meta": meta,
-    }
+        )
+    return {"risk_flags": risk_flags, "results": results, "meta": meta}
 
 
 def write_report(state: dict) -> dict:
