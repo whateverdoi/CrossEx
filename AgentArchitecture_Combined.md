@@ -140,29 +140,43 @@ flowchart TD
 # screener.py —— 纯确定性，无 IO 副作用集中在两个 fetch
 @dataclass
 class ScreenRule:
-    kind: str            # "filter" | "rank"
-    name: str            # 注册表 key，如 listing_days_lt
+    kind: str  # "filter" | "rank"
+    name: str  # 注册表 key，如 listing_days_lt
     params: dict = field(default_factory=dict)
+
 
 def select_tokens(rules: list[ScreenRule], top_n: int = 10) -> ScreeningResult:
     if is_mock_mode():
-        return ScreeningResult(mode="mock", rules=describe(rules),
-                               candidates=[{"symbol": s, "reason": "mock 固定候选", "metrics": {}}
-                                           for s in ["BTC", "ETH", "SOL", "UNI", "DOGE", "XRP"]])
-    tickers = binance.fetch_ticker_24h_all()             # 失败返回 None
+        return ScreeningResult(
+            mode="mock",
+            rules=describe(rules),
+            candidates=[
+                {"symbol": s, "reason": "mock 固定候选", "metrics": {}}
+                for s in ["BTC", "ETH", "SOL", "UNI", "DOGE", "XRP"]
+            ],
+        )
+    tickers = binance.fetch_ticker_24h_all()  # 失败返回 None
     listing = binance_futures.fetch_listing_days()
     if tickers is None or listing is None:
         raise ScreeningError("全市场快照拉取失败，批终止（失败即失败，不回退 mock）")
-    rows = [{"symbol": t["symbol"], "price_change_pct": t["price_change_pct"],
-             "quote_volume": t["quote_volume"],
-             "listing_days": listing.get(t["symbol"], UNKNOWN)}
-            for t in tickers]                            # 缺失字段标 UNKNOWN，规则保守排除
+    rows = [
+        {
+            "symbol": t["symbol"],
+            "price_change_pct": t["price_change_pct"],
+            "quote_volume": t["quote_volume"],
+            "listing_days": listing.get(t["symbol"], UNKNOWN),
+        }
+        for t in tickers
+    ]  # 缺失字段标 UNKNOWN，规则保守排除
     for f in (r for r in rules if r.kind == "filter"):  # AND 依次过滤
         rows = FILTERS[f.name](f.params).apply(rows)
     rank_rules = [r for r in rules if r.kind == "rank"]
-    rows = RANKERS[rank_rules[0].name].apply(rows) if rank_rules else rows   # 无 rank 规则时跳过排序（防 StopIteration）
-    return ScreeningResult(mode="auto", rules=describe(rules),
-                           candidates=rows[:top_n])       # 每条带 reason（命中规则 + 指标值）
+    rows = (
+        RANKERS[rank_rules[0].name].apply(rows) if rank_rules else rows
+    )  # 无 rank 规则时跳过排序（防 StopIteration）
+    return ScreeningResult(
+        mode="auto", rules=describe(rules), candidates=rows[:top_n]
+    )  # 每条带 reason（命中规则 + 指标值）
 ```
 
 **失败矩阵**：
@@ -199,15 +213,21 @@ def collect_data(state: dict) -> dict:
         tickers_ok = futures_ok = False
         aggregates = {"fees": None, "stablecoins": None, "dexs": None}
     else:
-        protocols = defillama.fetch_protocols()          # 批内一次
+        protocols = defillama.fetch_protocols()  # 批内一次
         chains = defillama.fetch_chains()
         tickers = binance.fetch_all_tickers(tokens)
         tickers_ok = bool(tickers)
         premium_map = binance_futures.fetch_premium_index()
         price_map = binance_futures.fetch_fapi_prices()
         futures_ok = bool(premium_map)
-        need_fees = any(not str(defillama.TOKEN_SLUG_MAP.get(t, "")).startswith("chain:") for t in tokens)
-        need_chain = any(str(defillama.TOKEN_SLUG_MAP.get(t, "")).startswith("chain:") for t in tokens)
+        need_fees = any(
+            not str(defillama.TOKEN_SLUG_MAP.get(t, "")).startswith("chain:")
+            for t in tokens
+        )
+        need_chain = any(
+            str(defillama.TOKEN_SLUG_MAP.get(t, "")).startswith("chain:")
+            for t in tokens
+        )
         aggregates = {
             "fees": defillama.fetch_fees() if need_fees else None,
             "stablecoins": defillama.fetch_stablecoins() if need_chain else None,
@@ -225,12 +245,24 @@ def collect_data(state: dict) -> dict:
     incomplete: list[str] = []
     with ThreadPoolExecutor(max_workers=4) as pool:
         for symbol, fund, mkt, web_snap in pool.map(_one, tokens):
-            market_data[symbol], fundamental_data[symbol], web_data[symbol] = mkt, fund, web_snap
-            if fund.get("incomplete") or mkt.get("incomplete") or web_snap.get("incomplete"):
+            market_data[symbol], fundamental_data[symbol], web_data[symbol] = (
+                mkt,
+                fund,
+                web_snap,
+            )
+            if (
+                fund.get("incomplete")
+                or mkt.get("incomplete")
+                or web_snap.get("incomplete")
+            ):
                 incomplete.append(symbol)
     meta["incomplete_tokens"] = incomplete
-    return {"market_data": market_data, "fundamental_data": fundamental_data,
-            "web_data": web_data, "meta": meta}
+    return {
+        "market_data": market_data,
+        "fundamental_data": fundamental_data,
+        "web_data": web_data,
+        "meta": meta,
+    }
 ```
 
 ### ② compute_signals — 确定性信号计算（含情绪维度）
@@ -246,23 +278,33 @@ def valuation_ratios(fund: dict | None, mkt: dict | None) -> dict:
     """估值比率（年化口径）：mc_fees / fdv_revenue / mc_tvl / fees_tvl。
     fees/revenue 用 24h 值 ×365 年化；chain 类无 mcap/fdv/fees → 自然 None。"""
 
+
 def momentum_score(fund: dict | None) -> dict:
     """基本面动量分：tvl_change_7d / tvl_change_30d 各 0.5 权重加权均值（%）。"""
+
 
 def divergence(fund: dict | None, mkt: dict | None) -> dict:
     """背离：divergence = 基本面增速 - 价格涨幅；四象限 I(双强)/II(弱基本强价格)
     /III(强基本弱价格，潜在做多候选)/IV(双弱)；任一缺失 → quadrant=None。"""
+
 
 def sentiment_raw(mkt: dict | None, ms: dict | None = None) -> dict:
     """情绪维度（情绪分析师视角）：持仓指标原始值直读，不做阈值加减分。
     阈值离散化会丢失信息（连续值压成 ±0.25 三档），且下游 LLM 按 prompt 规则直接解读原始值。
     输出 {components, note}；输入缺失的字段 → None（UNKNOWN 纪律）。
     """
-    comp = {"funding": _v(mkt, "funding"), "funding_trend": _v(mkt, "funding_trend"),
-            "ls_ratio_all": _v(ms, "ls_ratio_all"), "ls_ratio_top_pos": _v(ms, "ls_ratio_top_pos"),
-            "taker_bs_ratio": _v(ms, "taker_bs_ratio"), "oi_change_24h": _v(ms, "oi_change_24h")}
-    return {"components": comp,
-            "note": "持仓指标原始直读；解读规则见 DECIDE_PROMPT（funding 高=拥挤反向，多空比高=偏多等）"}
+    comp = {
+        "funding": _v(mkt, "funding"),
+        "funding_trend": _v(mkt, "funding_trend"),
+        "ls_ratio_all": _v(ms, "ls_ratio_all"),
+        "ls_ratio_top_pos": _v(ms, "ls_ratio_top_pos"),
+        "taker_bs_ratio": _v(ms, "taker_bs_ratio"),
+        "oi_change_24h": _v(ms, "oi_change_24h"),
+    }
+    return {
+        "components": comp,
+        "note": "持仓指标原始直读；解读规则见 DECIDE_PROMPT（funding 高=拥挤反向，多空比高=偏多等）",
+    }
 ```
 
 `compute_signals` 节点：`signals[symbol] = {"symbol": symbol, "valuation": ..., "momentum": ..., "divergence": ..., "sentiment": sentiment_raw(mkt, ms)}`（`ms = state["microstructure_data"][symbol]`）。
@@ -285,12 +327,17 @@ def sentiment_raw(mkt: dict | None, ms: dict | None = None) -> dict:
 ```python
 class FactItem(BaseModel):
     """一条事实证据（禁止结论性表述）。dimension = 四分析师视角；topic = 研究主题（7 值 + unknown）"""
+
     claim: str = Field(default="", description="论断内容")
-    source: str = Field(default="", description="白名单: binance/binance_futures/defillama/bing/mock")
+    source: str = Field(
+        default="", description="白名单: binance/binance_futures/defillama/bing/mock"
+    )
     timestamp: str = Field(default="", description="数据时间戳")
-    direction: Literal["bull", "bear", "neutral"] = "neutral"     # 供 challenge 预筛反方
+    direction: Literal["bull", "bear", "neutral"] = "neutral"  # 供 challenge 预筛反方
     dimension: Literal["fundamentals", "market", "sentiment", "news"] = "fundamentals"
-    topic: Literal["project", "team", "social", "adoption", "unlock", "catalyst", "news", "unknown"] = "unknown"
+    topic: Literal[
+        "project", "team", "social", "adoption", "unlock", "catalyst", "news", "unknown"
+    ] = "unknown"
     # before-validator 沿用变体字段归一模式：_DIMENSION_KEYS/_TOPIC_KEYS 映射，非法值置默认
 ```
 
@@ -308,6 +355,7 @@ def search_web(query: str, max_items: int = MAX_WEB_ITEMS) -> list[dict] | None:
     与 search_news 同一容错纪律：不重试，失败返回 None（调用方按 UNKNOWN 处理，绝不回退 mock）。
     """
 
+
 # tools.py 注册（第 5 个工具，FACTS_TOOLS 追加；CHALLENGE_TOOLS 不含 search_web——对抗者不给联网搜索）
 @tool
 def search_web(query: str) -> str:
@@ -320,9 +368,11 @@ def search_web(query: str) -> str:
     预算：单 token 研究内至多调用 3 次（六维 query 预算，prompt 约束）。
     """
     if is_mock_mode():
-        return (f"（mock 数据）{query} 搜索结果: 官网: 项目官网; "
-                f"团队: 匿名核心团队; unlock: 2026-Q3 解锁流通量 1.2%; "
-                f"社交: X 粉丝百万级; 融资: 2024 年 A 轮")
+        return (
+            f"（mock 数据）{query} 搜索结果: 官网: 项目官网; "
+            f"团队: 匿名核心团队; unlock: 2026-Q3 解锁流通量 1.2%; "
+            f"社交: X 粉丝百万级; 融资: 2024 年 A 轮"
+        )
     items = web.search_web(query)
     if items is None:
         return "搜索不可用（UNKNOWN）"
@@ -343,8 +393,10 @@ def research_facts(state: dict) -> dict:
         items: list[dict] = []
         try:
             agent = create_react_agent(get_llm(), FACTS_TOOLS, prompt=FACTS_PROMPT)
-            result = agent.invoke({"messages": [("human", summary)]},
-                                  config={"recursion_limit": AGENT_RECURSION_LIMIT})
+            result = agent.invoke(
+                {"messages": [("human", summary)]},
+                config={"recursion_limit": AGENT_RECURSION_LIMIT},
+            )
             obj = _extract_json(result["messages"][-1].content)
             for x in (obj or {}).get("facts") or []:
                 try:
@@ -380,10 +432,14 @@ def decide(state: dict) -> dict:
     for symbol in state["tokens"]:
         summary = _build_decide_summary(symbol, state)
         try:
-            analysis = _invoke_analysis(symbol, summary)     # json_mode 单次
+            analysis = _invoke_analysis(symbol, summary)  # json_mode 单次
         except Exception as exc:
-            analysis = {"symbol": symbol, "decision": "PASS", "confidence": 0.0,
-                        "error": f"LLM 分析失败: {exc}"}
+            analysis = {
+                "symbol": symbol,
+                "decision": "PASS",
+                "confidence": 0.0,
+                "error": f"LLM 分析失败: {exc}",
+            }
         decisions[symbol] = analysis
     return {"decisions": decisions}
 ```
@@ -403,10 +459,13 @@ def decide(state: dict) -> dict:
 ```python
 class ChallengeItem(BaseModel):
     """一条反方挑战。stance = 风控三人组视角：aggressive 质疑催化剂 / conservative 质疑错价依据 / neutral 质疑过程"""
+
     claim: str = Field(default="", description="反方论断")
     evidence: str = Field(default="", description="支撑数据（来源+数值，禁止编造）")
     severity: Literal["high", "medium", "low"] = "medium"
-    refutes: str = Field(default="", description="指向被挑战的决策理由字段；空=整体质疑")
+    refutes: str = Field(
+        default="", description="指向被挑战的决策理由字段；空=整体质疑"
+    )
     stance: Literal["aggressive", "conservative", "neutral"] = "conservative"
 ```
 
@@ -421,12 +480,18 @@ def challenge(state: dict) -> dict:
         if state["decisions"][symbol].get("decision") == "PASS":
             challenges[symbol] = []
             continue
-        summary = _build_challenge_summary(symbol, state)   # 决策全文 + 反方 facts + 信号
+        summary = _build_challenge_summary(
+            symbol, state
+        )  # 决策全文 + 反方 facts + 信号
         items: list[dict] = []
         try:
-            agent = create_react_agent(get_llm(), CHALLENGE_TOOLS, prompt=CHALLENGE_PROMPT)
-            result = agent.invoke({"messages": [("human", summary)]},
-                                  config={"recursion_limit": AGENT_RECURSION_LIMIT})
+            agent = create_react_agent(
+                get_llm(), CHALLENGE_TOOLS, prompt=CHALLENGE_PROMPT
+            )
+            result = agent.invoke(
+                {"messages": [("human", summary)]},
+                config={"recursion_limit": AGENT_RECURSION_LIMIT},
+            )
             obj = _extract_json(result["messages"][-1].content)
             for x in (obj or {}).get("challenges") or []:
                 try:
@@ -454,9 +519,10 @@ def challenge(state: dict) -> dict:
 ```python
 class RebuttalItem(BaseModel):
     """finalize 产出：对单条挑战的回应"""
+
     challenge_claim: str = Field(default="", description="对应哪条挑战（原文引用）")
     response: str = Field(default="", description="反驳理由（引用数据）或承认说明")
-    outcome: Literal["rebutted", "accepted"] = "rebutted"    # accepted → 自动降级
+    outcome: Literal["rebutted", "accepted"] = "rebutted"  # accepted → 自动降级
 ```
 
 **失败矩阵**：无挑战透传；LLM 异常 → 维持；单条丢弃。
@@ -474,14 +540,20 @@ def finalize(state: dict) -> dict:
             continue
         summary = _build_finalize_summary(symbol, state)
         try:
-            obj = _invoke_rebuttals(symbol, summary)                    # json_mode 单次
-            rebuttals = [RebuttalItem.model_validate(x).model_dump() for x in obj["rebuttals"]]
+            obj = _invoke_rebuttals(symbol, summary)  # json_mode 单次
+            rebuttals = [
+                RebuttalItem.model_validate(x).model_dump() for x in obj["rebuttals"]
+            ]
             analysis = dict(dec)
             for rb in rebuttals:
                 if rb["outcome"] == "accepted":
-                    analysis["decision"] = "WATCH"                      # 只降不升
-                    analysis["confidence"] = round(max(0.0, float(analysis.get("confidence", 0.0)) - 0.1), 2)
-                    analysis["risks"] = list(analysis.get("risks") or []) + [rb["response"]]
+                    analysis["decision"] = "WATCH"  # 只降不升
+                    analysis["confidence"] = round(
+                        max(0.0, float(analysis.get("confidence", 0.0)) - 0.1), 2
+                    )
+                    analysis["risks"] = list(analysis.get("risks") or []) + [
+                        rb["response"]
+                    ]
             final_decisions[symbol] = {"analysis": analysis, "rebuttals": rebuttals}
         except Exception:
             final_decisions[symbol] = {"analysis": dec, "rebuttals": []}
@@ -506,8 +578,9 @@ def finalize(state: dict) -> dict:
 ```python
 def risk_check(state: dict) -> dict:
     finals = state["final_decisions"]
-    trade_count = sum(1 for s in state["tokens"]
-                      if finals[s]["analysis"].get("decision") == "TRADE")
+    trade_count = sum(
+        1 for s in state["tokens"] if finals[s]["analysis"].get("decision") == "TRADE"
+    )
     risk_flags: dict[str, list[str]] = {}
     for symbol in state["tokens"]:
         item = finals[symbol]
@@ -518,7 +591,7 @@ def risk_check(state: dict) -> dict:
         sig = state.get("signals", {}).get(symbol) or {}
         mom = (sig.get("momentum") or {}).get("value")
         quad = ((sig.get("divergence") or {}).get("value") or {}).get("quadrant")
-        side = item["analysis"].get("direction")                 # long / short
+        side = item["analysis"].get("direction")  # long / short
         if side == "long":
             ok = (isinstance(mom, (int, float)) and mom >= 0) or quad in ("I", "III")
         elif side == "short":
@@ -533,9 +606,14 @@ def risk_check(state: dict) -> dict:
             item["analysis"]["decision"] = "WATCH"
             item["analysis"]["downgraded"] = flags
         risk_flags[symbol] = flags
-    results = [{**item["analysis"], "rebuttals": item["rebuttals"],
-                "risk_flags": risk_flags[symbol]}
-               for symbol in state["tokens"]]
+    results = [
+        {
+            **item["analysis"],
+            "rebuttals": item["rebuttals"],
+            "risk_flags": risk_flags[symbol],
+        }
+        for symbol in state["tokens"]
+    ]
     return {"risk_flags": risk_flags, "results": results}
 ```
 
@@ -549,22 +627,37 @@ def _build_artifacts(state: dict) -> dict:
     """candidates 工件：board 分层 + 机会分级 + 研究主题统计（全部确定性，LLM 不可改）"""
     artifacts: dict[str, dict] = {}
     for symbol, analysis in zip(state["tokens"], state["results"]):
-        vol = ((state.get("market_data", {}).get(symbol) or {}).get("quote_volume_24h") or {}).get("value")
-        tier = "high" if isinstance(vol, (int, float)) and vol >= 1e8 else \
-               "mid" if isinstance(vol, (int, float)) and vol >= 1e7 else "low"
-        level = "D" if analysis.get("downgraded") else \
-                {"TRADE": "A", "WATCH": "B", "PASS": "D"}.get(analysis.get("decision"), "D")
+        vol = (
+            (state.get("market_data", {}).get(symbol) or {}).get("quote_volume_24h")
+            or {}
+        ).get("value")
+        tier = (
+            "high"
+            if isinstance(vol, (int, float)) and vol >= 1e8
+            else "mid"
+            if isinstance(vol, (int, float)) and vol >= 1e7
+            else "low"
+        )
+        level = (
+            "D"
+            if analysis.get("downgraded")
+            else {"TRADE": "A", "WATCH": "B", "PASS": "D"}.get(
+                analysis.get("decision"), "D"
+            )
+        )
         catalysts: dict[str, int] = {}
         for f in state.get("facts", {}).get(symbol) or []:
             t = f.get("topic") or "unknown"
             catalysts[t] = catalysts.get(t, 0) + 1
         artifacts[symbol] = {
-            "liquidity_tier": tier,                      # 候选清单流动性分层
-            "opportunity_level": level,                  # TRADE→A / WATCH→B / PASS→D（降级→D）
+            "liquidity_tier": tier,  # 候选清单流动性分层
+            "opportunity_level": level,  # TRADE→A / WATCH→B / PASS→D（降级→D）
             "recommended_strategy": f"{analysis.get('direction', '')} {analysis.get('trade_structure', 'UNKNOWN')}".strip(),
             "confidence": analysis.get("confidence", 0.0),
-            "rationale": f"{analysis.get('mispricing', '')} | catalyst: {analysis.get('catalyst', '')}"[:200],
-            "catalysts": catalysts,                      # 研究主题统计（7 值 + unknown 计入）
+            "rationale": f"{analysis.get('mispricing', '')} | catalyst: {analysis.get('catalyst', '')}"[
+                :200
+            ],
+            "catalysts": catalysts,  # 研究主题统计（7 值 + unknown 计入）
         }
     return artifacts
 ```
