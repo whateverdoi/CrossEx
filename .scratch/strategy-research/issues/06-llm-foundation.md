@@ -19,7 +19,7 @@
 
 **文件**：新建 `schemas.py`（4 schema + validator + 5 prompt 常量 + `_extract_json`）、`tools.py`（注册表）；修改 `env.py`（get_llm）、`web.py`（`_parse_rss` 加 description + `search_web`）、`defillama.py`（3 个历史序列 fetch）、`mock.py`（3 个历史序列 mock）；测试 `test_schemas`（24 项）/ `test_tools`（15 项）/ `test_web` 追加 3 项 / `test_defillama` 追加 7 项。
 
-**get_llm（用户反馈后改用官方集成）**：`env.get_llm` 用 `langchain_deepseek.ChatDeepSeek` 官方包——api_key 自动读 `DEEPSEEK_API_KEY`、api_base 自动读 `DEEPSEEK_API_BASE`（默认官方端点）、model 默认 deepseek-chat 可被 `DEEPSEEK_MODEL` 覆盖；代码零 url/模型名常量（不手写 OpenAI 适配层）。代价：默认端点无 key 时官方包拒绝构造（ValueError），mock 链路不经过本函数；冒烟用 `DEEPSEEK_API_KEY=sk-` 占位构造。
+**get_llm（用户反馈后改用 langchain 标准接口）**：`env.get_llm` 用 `langchain.chat_models.init_chat_model`——api_key 自动读 `DEEPSEEK_API_KEY`（模块导入时 `_find_dotenv` 逐级向上查找并 `load_dotenv`，参考 agentdevelop 项目模式）、api_base 自动读 `DEEPSEEK_API_BASE`（默认官方端点）、model 默认 deepseek-chat（规格技术栈基线）可被 `DEEPSEEK_MODEL` 覆盖；代码零 url/模型名硬编码。无 key 时抛友好 RuntimeError（提示 .env 位置）；mock 链路不经过本函数。`temperature` 参数化（默认 0.1）。
 
 **宽容 validator 设计**：每个 schema 一个 `model_validator(mode="before")` 全量清洗——`_text`（null/占位→""）、`_pick`（白名单大小写不敏感）、`_dimension`/`_topic`（中英变体映射表 `_DIMENSION_KEYS`/`_TOPIC_KEYS`）、`_float`（数字/数字字符串）、`_list`；`model_validate` 永不抛 ValidationError，坏条目丢弃在装配层（③ 伪代码）。`TokenAnalysis` 含 16 字段（ANALYZE_PROMPT 第 8 条清单），decision 非法置 PASS（保守）、direction 非法置空、confidence clamp 0-1、evidence 逐条 EvidenceItem。
 
