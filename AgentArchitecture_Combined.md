@@ -12,7 +12,7 @@
 | 模块 | 职责 | 关键设计要点 |
 | --- | --- | --- |
 | `datasources/` | 免费数据源装配层 | `web.py`（Bing News RSS + Web RSS，零 key）、`defillama.py`、`binance.py`（**官方 SDK 薄适配**，含 `fetch_ticker_24h_all` 全市场 24hr ticker）、`binance_futures.py`（**官方 SDK 薄适配**，含微观结构端点：mark_price / openInterestHist / globalLongShortAccountRatio / topLongShortAccountRatio|PositionRatio / takerlongshortRatio / exchangeInfo（含 `fetch_listing_days` 全量 onboardDate））、`mock.py`；SDK 调用模式：`Spot(config_rest_api=...).rest_api` 惰性单例 + `to_plain()` 解包（pydantic→dict）+ 429/418 权重限流退避（参考 BinanceApi 项目已验证的 `WeightBudget` 模式）；数据点一律 `{value, source, timestamp, confidence}` 包装；**失败即失败**：数据源失败该数据点标记 error/UNKNOWN，绝不回退 mock（mock 仅限 `SR_MOCK=1` 显式离线模式）；`SR_MOCK=1` 时零外部请求 |
-| `screener.py` | 确定性币种筛选（图外入口） | 全市场 24hr ticker + exchangeInfo 各 1 次拉取；规则引擎：Filter（次新 / 流动性下限 / 排除稳定币）AND 依次过滤 → Rank（波动榜 / 涨跌榜 / 成交额榜）排序取 Top N，零 LLM；`SR_TOKENS` 手动覆盖跳过筛选；快照失败抛 `ScreeningError` 批终止（全架构唯一允许终止的节点）；mock 返回固定候选 |
+| `screener.py` | 确定性币种筛选（图外入口） | 全市场 24hr ticker + exchangeInfo 各 1 次拉取；规则引擎：Filter（次新 / 流动性下限 / 排除稳定币）AND 依次过滤 → Rank（错价榜 / 波动榜 / 涨跌榜 / 成交额榜）排序取 Top N，零 LLM；`SR_TOKENS` 手动覆盖跳过筛选；快照失败抛 `ScreeningError` 批终止（全架构唯一允许终止的节点）；mock 返回固定候选 |
 | `signals.py` | 确定性信号计算 | 纯函数无 IO：`valuation_ratios` / `momentum_score` / `divergence` / `sentiment_raw`；任何输入缺失 → `None`（UNKNOWN 纪律），绝不猜测 |
 | `schemas.py` | LLM 结构化输出 schema + 4 份 prompt | `TokenAnalysis`（含 direction）带宽容 validator（变体字段归一/默认值/白名单）；`FactItem` / `ChallengeItem` / `RebuttalItem`；`ANALYZE_PROMPT` / `FACTS_PROMPT` / `CHALLENGE_PROMPT` / `FINALIZE_PROMPT` |
 | `tools.py` | react agent 工具 | 两个注册表：`FACTS_TOOLS`（③ 用，5 个：`get_tvl_history` / `get_fees_history` / `get_funding_history` / `get_stablecoin_history`（历史序列）+ `search_web`（六维查询模板））/ `CHALLENGE_TOOLS`（⑤ 用，4 个，**不含 search_web**——对抗者不给联网搜索）；降采样 ≤10 点；工具层永不抛异常 |
@@ -32,7 +32,7 @@ flowchart TD
     classDef OUT fill:#e3f2fd,stroke:#1565c0,color:#0d47a1;
     classDef SCR fill:#f3e5f5,stroke:#6a1b9a,color:#4a148c;
 
-    SCR["⑨ screener · 确定性（图外入口）<br/>全市场快照各 1 次拉取<br/>次新/流动性过滤 → 波动榜 Top N"]
+    SCR["⑨ screener · 确定性（图外入口）<br/>全市场快照各 1 次拉取<br/>次新/流动性过滤 → 错价榜 Top N"]
     START([START])
     CD["① collect_data · 确定性<br/>共享资源批内一次<br/>per-token 并发快照（含微观结构）"]
     CS["② compute_signals · 确定性<br/>估值/动量/背离<br/>+ sentiment 拥挤度"]
@@ -128,11 +128,12 @@ flowchart TD
 | Filter | `listing_days_lt` | `max_days=100` | 次新：合约上线 ≤100 天 |
 | Filter | `min_quote_volume` | `min_quote_volume=1e7` | 流动性下限（24h 成交额） |
 | Filter | `exclude_stablecoins` | — | 排除 USDT/USDC/FDUSD/TUSD 等计价稳定币（symbol 后缀） |
-| Rank | `volatility_24h` | `top_n=10, abs=True` | \|24h 涨跌幅\| 降序（波动榜，用户默认） |
+| Rank | `mispricing_24h` | `top_n=10` | 错价榜：24h 涨跌幅升序排名 + 成交额降序排名等权合成（价格弱 + 成交活跃优先，用户默认） |
+| Rank | `volatility_24h` | `top_n=10, abs=True` | \|24h 涨跌幅\| 降序（波动榜） |
 | Rank | `gain_24h` / `loss_24h` | `top_n=10` | 单边涨 / 单边跌榜 |
 | Rank | `quote_volume` | `top_n=10` | 成交额榜 |
 
-用户示例“上交易所 100 天以内的币，24h 波动最大前 10”= `[listing_days_lt(100), min_quote_volume(1e7), exclude_stablecoins] + volatility_24h(top_n=10)`。
+用户示例“上交易所 100 天以内的币，24h 波动最大前 10”= `[listing_days_lt(100), min_quote_volume(1e7), exclude_stablecoins] + volatility_24h(top_n=10)`；默认错价榜 = `[listing_days_lt(100), min_quote_volume(1e7), exclude_stablecoins] + mispricing_24h(top_n=10)`。
 
 **伪代码**：
 
@@ -804,7 +805,7 @@ def _build_artifacts(state: dict) -> dict:
 | --- | --- | --- | --- |
 | 1 | 项目骨架：`__init__.py`、`main.py` 入口、`.env.example`、依赖清单 | 根目录 | `python -m strategy_research.graph` 占位可运行 |
 | 2 | `datasources/`：defillama / binance / binance_futures（含 openInterestHist / globalLongShortAccountRatio / takerlongshortRatio / exchangeInfo 微观结构端点）/ web / mock | `datasources/` | mock 模式零外部请求；真实模式各端点冒烟可用（官方 SDK 已实测直连）；**失败即失败**：注入断网后数据点=error/UNKNOWN，零 mock 数据混入；数据点四元组包装 |
-| 3 | `screener.py`：规则引擎（Filter/Rank 注册表）+ `select_tokens` + mock 固定候选 | `screener.py` | 单测：次新过滤 / 波动榜排序 / 稳定币排除 / 快照失败抛 `ScreeningError`；mock 返回固定 6 候选；`SR_TOKENS` 覆盖跳过筛选 |
+| 3 | `screener.py`：规则引擎（Filter/Rank 注册表）+ `select_tokens` + mock 固定候选 | `screener.py` | 单测：次新过滤 / 错价榜与波动榜排序 / 稳定币排除 / 快照失败抛 `ScreeningError`；mock 返回固定 6 候选；`SR_TOKENS` 覆盖跳过筛选 |
 | 4 | `signals.py` 四个纯函数 + `compute_signals` 节点雏形 | `signals.py` | 单测：估值/动量/背离/sentiment 各 3 种输入（正常/缺失/异常）；缺失→None |
 | 5 | `schemas.py`：TokenAnalysis（含 direction，无 max_loss/invalidation，宽容 validator）+ FactItem（dimension/topic）/ ChallengeItem（stance）/ RebuttalItem | `schemas.py` | 变体字段/白名单/默认值单测通过（含 direction 白名单 long/short）；null 输出可解析不抛异常 |
 | 6 | `tools.py` 五个工具分 FACTS_TOOLS/CHALLENGE_TOOLS 注册 + mock 分支 + `_extract_json` | `tools.py` | 单测：成功/无结果/失败 3 种返回；工具层永不抛异常；CHALLENGE_TOOLS 不含 search_web |
@@ -816,7 +817,7 @@ def _build_artifacts(state: dict) -> dict:
 | 12 | `graph.py` 8 节点装配 | `graph.py` | `python -m strategy_research.graph` 编译通过；9 条边全实线 |
 | 13 | `report.py`：overview.md + run.json + candidates.json + snapshot/signal_diff + `_build_artifacts` | `report.py` | 工件生成且 liquidity_tier/level 映射正确；无 facts/challenges 渲染空节不报错；overview 含“币种筛选”节（meta.screening）；快照覆盖与对比正确（构造 prev 验证 stop_short） |
 | 14 | mock 全 6 token 端到端回归 + 真实 API 冒烟（BTC/UNI，含 search_web 实测）+ 异常注入（断网跑 challenge） | — | 全链降级路径各触发一次；报告与工件可生成；PASS 透传路径零 LLM 调用可验证 |
-| 15 | 筛选器端到端验证：真实模式跑 `listing_days_lt(100)+volatility_24h(10)` 产出候选；注入断网验证 `ScreeningError` 批终止；`--tokens`/`SR_TOKENS` 手动模式验证（与筛选互斥，`meta.screening.mode="manual"`） | — | 候选带 reason 与指标；`meta.screening` 落盘；批终止报错信息明确；手动模式跳过筛选直接判断 |
+| 15 | 筛选器端到端验证：真实模式跑 `listing_days_lt(100)+mispricing_24h(10)` 产出候选；注入断网验证 `ScreeningError` 批终止；`--tokens`/`SR_TOKENS` 手动模式验证（与筛选互斥，`meta.screening.mode="manual"`） | — | 候选带 reason 与指标；`meta.screening` 落盘；批终止报错信息明确；手动模式跳过筛选直接判断 |
 
 ## 九、关键设计决策
 

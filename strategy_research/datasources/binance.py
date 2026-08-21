@@ -3,6 +3,8 @@
 - ``fetch_ticker_24h_all()``：/api/v3/ticker/24hr 全市场（权重 80），
   返回 ``[{symbol, price, price_change_pct, quote_volume}]``（float 化）；
   失败返回 ``None``（装配层标 UNKNOWN，规格 ⑨ 契约）。
+- ``fetch_exchange_info()``：/api/v3/exchangeInfo 全量交易对（权重 10），
+  供筛选器构建现货 USDT 白名单（与 BinanceApi 筛选同款：TRADING + 非稳定币标的）。
 - ``fetch_klines()``：/api/v3/klines 日线窗口（权重随 limit），
   返回 ``[{open_time, close_price}]``。
 - ``SR_MOCK=1`` 时走 :mod:`mock` 同构数据，零外部请求。
@@ -49,6 +51,27 @@ def fetch_ticker_24h_all() -> list[dict] | None:
         except (KeyError, TypeError, ValueError):
             continue  # 单条字段异常跳过，该 symbol 数据点缺失
     return rows
+
+
+def fetch_exchange_info() -> dict | None:
+    """现货全量交易对信息（/api/v3/exchangeInfo，权重 10）。
+
+    供筛选器构建候选白名单（symbol 格式 + 状态 + 标的资产判定）；
+    失败返回 ``None``（筛选层抛 ``ScreeningError`` 批终止）。
+    """
+    if env.is_mock_mode():
+        return mock.mock_spot_exchange_info()
+    try:
+        data = _binance_sdk.sync_call_with_rate_limit(
+            _binance_sdk.get_spot_data_client().exchange_info,
+            name="exchangeInfo(spot)",
+            weight=10,
+        )
+    except Exception:
+        return None
+    if not isinstance(data, dict) or data.get("symbols") is None:
+        return None
+    return data
 
 
 def fetch_klines(

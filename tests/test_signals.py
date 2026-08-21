@@ -13,15 +13,18 @@ from strategy_research import signals as sig
 from strategy_research.datasources import mock as m
 from strategy_research.datasources.mock import MOCK_TOKENS
 
-#: sentiment components 字段集（规格 ② 6 字段 + 票 05 的 ls_ratio_top_acc）
+#: sentiment components 字段集（规格 ② 6 字段 + 票 05 的 ls_ratio_top_acc
+#: + 票 14 的 funding_pctile_90d / oi_price_divergence）
 _COMPONENT_KEYS = {
     "funding",
+    "funding_pctile_90d",
     "funding_trend",
     "ls_ratio_all",
     "ls_ratio_top_acc",
     "ls_ratio_top_pos",
     "taker_bs_ratio",
     "oi_change_24h",
+    "oi_price_divergence",
 }
 
 
@@ -74,6 +77,7 @@ def _mkt(**over: object) -> dict:
         "funding": _dp(0.0001),
         "funding_avg_7d": _dp(0.0001),
         "funding_trend": _dp("rising"),
+        "funding_pctile_90d": _dp(50.0),
         "oi": _dp(1e9),
         "basis": _dp(0.0),
         "taker_buy_ratio_24h": _dp(0.5),
@@ -90,6 +94,9 @@ def _ms(**over: object) -> dict:
     """构造 microstructure 快照。"""
     base = {
         "oi_change_24h": _dp(2.0),
+        "oi_price_divergence": _dp(
+            {"label": "confirm_long", "note": "价涨 OI 增：新多进场，趋势确认"}
+        ),
         "oi_change_48h": _dp(3.0),
         "oi_value_change_24h": _dp(4.0),
         "ls_ratio_all": _dp(1.05),
@@ -211,6 +218,80 @@ def test_divergence_abnormal() -> None:
     assert d["divergence_7d"] is None and d["quadrant"] is None
 
 
+# ── funding_percentile ────────────────────────────────────
+
+
+def test_funding_percentile_normal() -> None:
+    """最新 |funding| 在窗口分布中的分位（0-100），时间升序最新在末尾。"""
+    # 三档周期序列（0.0001/0.00015/0.0002 各 4 个），最新为最大档 → 100
+    hist = [
+        {"funding_time": i, "funding_rate": 0.0001 * (1 + (i % 3) * 0.5)}
+        for i in range(12)
+    ]
+    assert sig.funding_percentile(hist) == 100.0
+    # 最新改为最小档（0.0001 出现 5 次/12）→ 41.7
+    hist[-1]["funding_rate"] = 0.0001
+    assert sig.funding_percentile(hist) == pytest.approx(41.7, abs=0.1)
+
+
+def test_funding_percentile_mid() -> None:
+    """最新处于分布中位 → 50 附近。"""
+    vals = [0.0001 + i * 0.00001 for i in range(11)]  # 等差 11 个
+    hist = [{"funding_time": i, "funding_rate": v} for i, v in enumerate(vals)]
+    hist[-1]["funding_rate"] = 0.00015  # 中位值
+    assert sig.funding_percentile(hist) == pytest.approx(54.5, abs=0.1)
+
+
+def test_funding_percentile_insufficient() -> None:
+    """样本 <10 / 空 / None → None（UNKNOWN 纪律）。"""
+    hist = [
+        {"funding_time": i, "funding_rate": 0.0001 * (1 + i * 0.1)}
+        for i in range(9)
+    ]
+    assert sig.funding_percentile(hist) is None
+    assert sig.funding_percentile(None) is None
+    assert sig.funding_percentile([]) is None
+
+
+def test_funding_percentile_constant() -> None:
+    """常数序列（分布退化，无分位信息）→ None。"""
+    hist = [{"funding_time": i, "funding_rate": 0.0001} for i in range(20)]
+    assert sig.funding_percentile(hist) is None
+
+
+def test_funding_percentile_abnormal() -> None:
+    """最新值非法 → None；序列含非法值但最新合法 → 过滤后计算。"""
+    hist = [
+        {"funding_time": i, "funding_rate": 0.0001 * (1 + i * 0.1)}
+        for i in range(15)
+    ]
+    bad = [*hist, {"funding_time": 99, "funding_rate": "oops"}]
+    assert sig.funding_percentile(bad) is None
+    hist[3]["funding_rate"] = "bad"
+    assert sig.funding_percentile(hist) is not None
+
+
+# ── oi_price_divergence ────────────────────────────────────
+
+
+def test_oi_divergence_quadrants() -> None:
+    """四象限：价 OI 同向 = 新仓确认，背离 = 存量换手弱势。"""
+    assert sig.oi_price_divergence(2.0, 5.0)["label"] == "confirm_long"
+    assert sig.oi_price_divergence(2.0, -5.0)["label"] == "weak_long"
+    assert sig.oi_price_divergence(-2.0, 5.0)["label"] == "confirm_short"
+    assert sig.oi_price_divergence(-2.0, -5.0)["label"] == "weak_short"
+
+
+def test_oi_divergence_missing_or_zero() -> None:
+    """缺失 → None（UNKNOWN 纪律）；0 → none（零值无方向）；note 非空。"""
+    assert sig.oi_price_divergence(None, 5.0) is None
+    assert sig.oi_price_divergence(2.0, None) is None
+    for price, oi in ((0.0, 5.0), (2.0, 0.0)):
+        got = sig.oi_price_divergence(price, oi)
+        assert got["label"] == "none"
+        assert got["note"]
+
+
 # ── sentiment_raw ──────────────────────────────────────────
 
 
@@ -219,12 +300,17 @@ def test_sentiment_normal() -> None:
     s = sig.sentiment_raw(_mkt(), _ms())
     assert s["components"] == {
         "funding": 0.0001,
+        "funding_pctile_90d": 50.0,
         "funding_trend": "rising",
         "ls_ratio_all": 1.05,
         "ls_ratio_top_acc": 1.2,
         "ls_ratio_top_pos": 1.1,
         "taker_bs_ratio": 1.0,
         "oi_change_24h": 2.0,
+        "oi_price_divergence": {
+            "label": "confirm_long",
+            "note": "价涨 OI 增：新多进场，趋势确认",
+        },
     }
     assert "DECIDE_PROMPT" in s["note"]
 

@@ -167,6 +167,31 @@ class QuoteVolumeRanker(_Ranker):
         return self._metric(row, "quote_volume")
 
 
+class MispricingRanker(_Ranker):
+    """错价榜：价格弱 + 成交活跃优先（潜在错价候选）。
+
+    筛选阶段无基本面数据，用价格/成交两维近似「基本面强/价格弱」（象限
+    III）的价格侧代理：pct 升序排名 + vol 降序排名等权合成（score 越小
+    越优先）；任一指标缺失（None/UNKNOWN）排最后（保守纪律）。
+    """
+
+    def apply(self, rows: list[dict]) -> list[dict]:
+        valid = [
+            r
+            for r in rows
+            if isinstance(r.get("price_change_pct"), (int, float))
+            and isinstance(r.get("quote_volume"), (int, float))
+        ]
+        valid_ids = {id(r) for r in valid}
+        invalid = [r for r in rows if id(r) not in valid_ids]
+        by_pct = sorted(valid, key=lambda r: r["price_change_pct"])
+        by_vol = sorted(valid, key=lambda r: r["quote_volume"], reverse=True)
+        pct_rank = {id(r): i for i, r in enumerate(by_pct)}
+        vol_rank = {id(r): i for i, r in enumerate(by_vol)}
+        valid.sort(key=lambda r: pct_rank[id(r)] + vol_rank[id(r)])
+        return valid + invalid
+
+
 FILTERS: dict[str, type[_Rule]] = {
     "listing_days_lt": ListingDaysLtFilter,
     "min_quote_volume": MinQuoteVolumeFilter,
@@ -178,14 +203,15 @@ RANKERS: dict[str, type[_Rule]] = {
     "gain_24h": Gain24hRanker,
     "loss_24h": Loss24hRanker,
     "quote_volume": QuoteVolumeRanker,
+    "mispricing_24h": MispricingRanker,
 }
 
-#: 默认规则（规格用户示例）：次新 ≤100 天 + 流动性下限 + 排除稳定币 → 波动榜
+#: 默认规则（规格用户示例）：次新 ≤100 天 + 流动性下限 + 排除稳定币 → 错价榜
 DEFAULT_RULES = [
     ScreenRule("filter", "listing_days_lt", {"max_days": 100}),
     ScreenRule("filter", "min_quote_volume", {"min_quote_volume": 1e7}),
     ScreenRule("filter", "exclude_stablecoins"),
-    ScreenRule("rank", "volatility_24h", {"abs": True}),
+    ScreenRule("rank", "mispricing_24h"),
 ]
 
 
@@ -213,10 +239,13 @@ def _candidate(row: dict, rules_desc: str) -> dict:
 
 
 def select_tokens(rules: list[ScreenRule], top_n: int = 10) -> ScreeningResult:
-    """确定性选币：全市场快照各 1 次 → Filter AND → Rank → 截取 top_n。
+    """确定性选币：全市场快照各 1 次 → 现货 USDT 白名单 → Filter AND → Rank → top_n。
 
     快照任一失败抛 ``ScreeningError`` 批终止（失败即失败，不回退 mock）；
     无 rank 规则时跳过排序（防 StopIteration）。
+    白名单（规格：ticker + exchangeInfo 各 1 次）：与 BinanceApi 筛选同款——
+    仅保留现货 ``TRADING`` 且以 USDT 计价、标的非稳定币的交易对，排除
+    ETHBTC/BTCU/BTCUSD1 等非规范 symbol 进入候选。
     """
     if is_mock_mode():
         return ScreeningResult(
@@ -227,14 +256,23 @@ def select_tokens(rules: list[ScreenRule], top_n: int = 10) -> ScreeningResult:
 
     tickers = binance.fetch_ticker_24h_all()
     listing = binance_futures.fetch_listing_days()
-    if tickers is None or listing is None:
+    info = binance.fetch_exchange_info()
+    if tickers is None or listing is None or info is None:
         raise ScreeningError("全市场快照拉取失败，批终止（失败即失败，不回退 mock）")
+
+    whitelist = {
+        s["symbol"]
+        for s in info.get("symbols") or []
+        if s.get("status") == "TRADING"
+        and str(s.get("symbol", "")).endswith("USDT")
+        and s.get("baseAsset") not in _STABLE_BASES
+    }
 
     rows: list[dict] = []
     for t in tickers:
         symbol = t.get("symbol")
-        if not symbol:
-            continue  # 无 symbol 无法参与筛选，跳过
+        if not symbol or symbol not in whitelist:
+            continue  # 非现货 USDT 交易对（交叉对/指数/非交易状态）不参与筛选
         rows.append(
             {
                 "symbol": symbol,

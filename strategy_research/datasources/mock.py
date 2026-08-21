@@ -76,9 +76,10 @@ def mock_klines(symbol: str, interval: str = "1d", limit: int = 365) -> list[dic
     """日线窗口（与 fetch_klines 同构）：价格绕基准小幅波动。"""
     price = _price(symbol)
     step_days = {"1d": 1, "4h": 1 / 6, "1h": 1 / 24}.get(interval, 1)
+    # open_time 毫秒级（与真实 fetch_klines 的 int(k[0]) 同构）
     return [
         {
-            "open_time": int(_now_ms() / 1000) - i * int(86_400 * step_days),
+            "open_time": _now_ms() - i * int(86_400_000 * step_days),
             "close_price": round(price * (1 + 0.001 * (i % 7)), 6),
         }
         for i in range(max(1, limit))
@@ -180,6 +181,16 @@ def mock_series(
         {"symbol": symbol, **base, "timestamp": now - i * step_ms}
         for i in range(max(1, limit))
     ]
+
+
+def mock_spot_exchange_info() -> dict:
+    """现货全量交易对信息（与 fetch_exchange_info 同构；白名单=全部 mock 现货对）。"""
+    return {
+        "symbols": [
+            {"symbol": f"{s}USDT", "status": "TRADING", "baseAsset": s}
+            for s in _MOCK_MARKET
+        ]
+    }
 
 
 def mock_exchange_info() -> dict:
@@ -368,7 +379,8 @@ def mock_web_rss(query: str) -> list[dict]:
 
 #: sentiment 解读规则（与 signals.sentiment_raw 的 note 同构）
 _SENTIMENT_NOTE = (
-    "持仓指标原始直读；解读规则见 DECIDE_PROMPT（funding 高=拥挤反向，多空比高=偏多等）"
+    "持仓指标原始直读；解读规则见 DECIDE_PROMPT（funding 高=拥挤反向，多空比高=偏多；"
+    "funding_pctile_90d 高分位=费率极端拥挤；oi_price_divergence 同向=趋势确认，背离=弱势）"
 )
 
 
@@ -460,6 +472,39 @@ def _mock_valuation(symbol: str, kind: str | None) -> dict:
     }
 
 
+def _price_change_24h(symbol: str) -> float | None:
+    """mock 24h 价格变化 %（与真实路径 mkt.change_24h 同源：mock ticker）。"""
+    for row in mock_ticker_24h_all():
+        if row["symbol"] == f"{symbol}USDT":
+            return row["price_change_pct"]
+    return None
+
+
+def _funding_pctile_90d(symbol: str) -> float | None:
+    """mock 费率极值分位（与真实路径同一纯函数：mock 270 根费率序列）。"""
+    from ..signals import funding_percentile  # 延迟导入避免循环
+
+    return funding_percentile(mock_funding_rate_history(symbol, 270))
+
+
+def _oi_change_24h(symbol: str) -> float:
+    """mock OI 24h 变化率（%）：mock 序列恒定 → 0.0，从序列首尾推导（同真实 _series_pct_change）。"""
+    hist = mock_series("open_interest_hist", symbol, limit=25)
+    if not hist:
+        return 0.0
+    first = hist[0]["sum_open_interest"]
+    if not first:
+        return 0.0
+    return (hist[-1]["sum_open_interest"] - first) / first * 100.0
+
+
+def _oi_price_divergence(symbol: str) -> dict:
+    """mock OI/价格背离（同真实路径：ticker 价格变化 + OI 序列 24h 变化）。"""
+    from ..signals import oi_price_divergence  # 延迟导入避免循环
+
+    return oi_price_divergence(_price_change_24h(symbol), _oi_change_24h(symbol))
+
+
 def mock_signals_data(symbol: str, kind: str | None = None) -> dict:
     """② 信号层 mock：值从 mock 数据源推导，与同一快照上的纯函数输出一致。
 
@@ -493,6 +538,8 @@ def mock_signals_data(symbol: str, kind: str | None = None) -> dict:
             "components": {
                 **_MOCK_SENTIMENT_FIXED,
                 "funding_trend": _funding_trend(symbol),
+                "funding_pctile_90d": _funding_pctile_90d(symbol),
+                "oi_price_divergence": _oi_price_divergence(symbol),
             },
             "note": _SENTIMENT_NOTE,
         },

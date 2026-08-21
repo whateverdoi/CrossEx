@@ -120,6 +120,37 @@ def test_rank_quote_volume_sorts_by_volume_desc():
     assert [r["symbol"] for r in out] == ["B", "C", "A"]
 
 
+def test_rank_mispricing_24h_prefers_weak_price_high_volume():
+    """错价榜：价格弱 + 成交活跃优先（pct 升序排名 + vol 降序排名等权）。"""
+    from strategy_research.screener import RANKERS
+
+    rows = [
+        _row("A", change=2.0, vol=1e9),
+        _row("B", change=-5.0, vol=5e8),
+        _row("C", change=-3.0, vol=1e8),
+        _row("D", change=-1.0, vol=1e6),
+    ]
+    out = RANKERS["mispricing_24h"]({}).apply(rows)
+    # score（越小越优先）: B=0+1=1 → A=3+0=3 / C=1+2=3 → D=2+3=5
+    assert [r["symbol"] for r in out] == ["B", "A", "C", "D"]
+
+
+def test_rank_mispricing_24h_missing_metric_last():
+    """任一指标缺失（含 UNKNOWN 字符串）→ 排最后（保守纪律）。"""
+    from strategy_research.screener import RANKERS
+
+    rows = [
+        _row("A", change=2.0, vol=5e8),
+        _row("B", change=-5.0, vol=1e9),
+        _row("C"),
+        _row("D", change=-3.0),
+        _row("E", vol=1e8),
+    ]
+    out = RANKERS["mispricing_24h"]({}).apply(rows)
+    # score: B=0+0=0 → A=1+1=2；C/D/E 缺失排最后（保序）
+    assert [r["symbol"] for r in out] == ["B", "A", "C", "D", "E"]
+
+
 def test_rank_volatility_abs_false_keeps_sign():
     """abs=False 时按原始涨跌降序（负数在前）。"""
     from strategy_research.screener import RANKERS
@@ -153,10 +184,34 @@ def _fake_tickers() -> list[dict]:
     return [
         {"symbol": "BTCUSDT", "price_change_pct": 2.5, "quote_volume": 1.2e9},
         {"symbol": "SOLUSDT", "price_change_pct": 5.2, "quote_volume": 3.0e8},
-        {"symbol": "NEWUSDT", "price_change_pct": -3.1, "quote_volume": 1.5e8},
+        {"symbol": "NEWUSDT", "price_change_pct": -3.1, "quote_volume": 5e8},
         {"symbol": "OLDUSDT", "price_change_pct": 1.0, "quote_volume": 2.0e8},
         {"symbol": "USDCUSDT", "price_change_pct": 0.1, "quote_volume": 9.9e9},
+        # 真实全市场 24hr ticker 的噪声对：交叉对/指数类/杠杆代币
+        {"symbol": "ETHBTC", "price_change_pct": 1.0, "quote_volume": 3.0e8},
+        {"symbol": "BTCUSD1", "price_change_pct": 2.4, "quote_volume": 3.4e8},
+        {"symbol": "BTCU", "price_change_pct": 2.5, "quote_volume": 1.3e8},
+        {"symbol": "ETHU", "price_change_pct": 1.7, "quote_volume": 2.8e7},
     ]
+
+
+def _fake_exchange_info() -> dict:
+    """现货 exchangeInfo：白名单 = TRADING + USDT 计价 + 标的非稳定币。"""
+    return {
+        "symbols": [
+            {"symbol": "BTCUSDT", "status": "TRADING", "baseAsset": "BTC"},
+            {"symbol": "SOLUSDT", "status": "TRADING", "baseAsset": "SOL"},
+            {"symbol": "NEWUSDT", "status": "TRADING", "baseAsset": "NEW"},
+            {"symbol": "OLDUSDT", "status": "TRADING", "baseAsset": "OLD"},
+            # 以下全部应被白名单排除
+            {"symbol": "USDCUSDT", "status": "TRADING", "baseAsset": "USDC"},
+            {"symbol": "ETHBTC", "status": "TRADING", "baseAsset": "ETH"},
+            {"symbol": "BTCUSD1", "status": "TRADING", "baseAsset": "BTC"},
+            {"symbol": "BTCU", "status": "TRADING", "baseAsset": "BTC"},
+            {"symbol": "ETHU", "status": "TRADING", "baseAsset": "ETH"},
+            {"symbol": "SUSPENDUSDT", "status": "BREAK", "baseAsset": "SUSPEND"},
+        ]
+    }
 
 
 def _fake_listing() -> dict[str, int]:
@@ -172,6 +227,7 @@ def _fake_listing() -> dict[str, int]:
 def _patch_fetch(monkeypatch) -> None:
     monkeypatch.setenv("SR_MOCK", "0")
     monkeypatch.setattr(binance, "fetch_ticker_24h_all", _fake_tickers)
+    monkeypatch.setattr(binance, "fetch_exchange_info", _fake_exchange_info)
     monkeypatch.setattr(binance_futures, "fetch_listing_days", _fake_listing)
 
 
@@ -184,30 +240,52 @@ def test_select_tokens_auto_filters_ranks_and_annotates(monkeypatch):
         "listing_days_lt(max_days=100)",
         "min_quote_volume(min_quote_volume=10000000.0)",
         "exclude_stablecoins()",
-        "volatility_24h(abs=True)",
+        "mispricing_24h()",
     ]
-    # 过滤掉 OLDUSDT(101 天) 与 USDCUSDT(稳定币)；波动榜 → SOLUSDT 居首
+    # 过滤掉 OLDUSDT(101 天)、USDCUSDT(稳定币) 与 BTCUSDT(2000 天次新外)；
+    # 错价榜：NEW(价跌量高) score=0 → SOL(价涨量中) score=2（与波动榜 SOL 居首区分）
     assert [c["symbol"] for c in result.candidates] == [
-        "SOLUSDT",
         "NEWUSDT",
+        "SOLUSDT",
     ]
     c = result.candidates[0]
-    assert "volatility_24h" in c["reason"]
-    assert c["metrics"]["price_change_pct"] == 5.2
-    assert c["metrics"]["listing_days"] == 90
+    assert "mispricing_24h" in c["reason"]
+    assert c["metrics"]["price_change_pct"] == -3.1
+    assert c["metrics"]["listing_days"] == 45
 
 
 def test_select_tokens_snapshot_failure_raises_screening_error(monkeypatch):
     monkeypatch.setenv("SR_MOCK", "0")
     monkeypatch.setattr(binance, "fetch_ticker_24h_all", lambda: None)
+    monkeypatch.setattr(binance, "fetch_exchange_info", _fake_exchange_info)
     monkeypatch.setattr(binance_futures, "fetch_listing_days", _fake_listing)
     with pytest.raises(ScreeningError):
         select_tokens(DEFAULT_RULES)
 
     monkeypatch.setattr(binance, "fetch_ticker_24h_all", _fake_tickers)
+    monkeypatch.setattr(binance, "fetch_exchange_info", lambda: None)
     monkeypatch.setattr(binance_futures, "fetch_listing_days", lambda: None)
     with pytest.raises(ScreeningError, match="批终止"):
         select_tokens(DEFAULT_RULES)
+
+    # exchangeInfo 失败同样批终止（规格：ticker + exchangeInfo 各 1 次，任一失败终止）
+    monkeypatch.setattr(binance, "fetch_ticker_24h_all", _fake_tickers)
+    monkeypatch.setattr(binance, "fetch_exchange_info", lambda: None)
+    monkeypatch.setattr(binance_futures, "fetch_listing_days", _fake_listing)
+    with pytest.raises(ScreeningError, match="批终止"):
+        select_tokens(DEFAULT_RULES)
+
+
+def test_select_tokens_whitelist_filters_noise_pairs(monkeypatch):
+    """现货 USDT 白名单：交叉对/指数类/杠杆代币/非 TRADING/稳定币标的全部排除。"""
+    _patch_fetch(monkeypatch)
+    result = select_tokens(
+        [ScreenRule("rank", "quote_volume", {})], top_n=50
+    )
+    symbols = [c["symbol"] for c in result.candidates]
+    assert "BTCUSDT" in symbols
+    for noise in ("ETHBTC", "BTCUSD1", "BTCU", "ETHU", "USDCUSDT", "SUSPENDUSDT"):
+        assert noise not in symbols, f"白名单应排除 {noise}"
 
 
 def test_select_tokens_no_rank_rules_skips_sorting(monkeypatch):

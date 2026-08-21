@@ -14,7 +14,8 @@ from typing import Any
 
 #: sentiment 解读规则锚点（与 DECIDE_PROMPT 一致，见规格 ②）
 _SENTIMENT_NOTE = (
-    "持仓指标原始直读；解读规则见 DECIDE_PROMPT（funding 高=拥挤反向，多空比高=偏多等）"
+    "持仓指标原始直读；解读规则见 DECIDE_PROMPT（funding 高=拥挤反向，多空比高=偏多；"
+    "funding_pctile_90d 高分位=费率极端拥挤；oi_price_divergence 同向=趋势确认，背离=弱势）"
 )
 
 
@@ -101,6 +102,52 @@ def divergence(fund: dict | None, mkt: dict | None) -> dict:
     return {"value": {"divergence_7d": div7, "divergence_30d": div30, "quadrant": quad}}
 
 
+def funding_percentile(hist: list[dict] | None) -> float | None:
+    """资金费率极值分位：最新 |funding| 在窗口分布中的分位（0-100）。
+
+    分位高 = 费率处于历史极端（多头或空头拥挤加剧），对短窗口单根异常平滑化。
+    样本 <10 / 分布退化（常数序列）/ 非法值 → None（UNKNOWN 纪律）。
+    入参时间升序，最新在末尾（fetch_funding_rate_history 同构）。
+    """
+    if not hist:
+        return None
+    last_raw = hist[-1].get("funding_rate")
+    if not isinstance(last_raw, (int, float)):
+        return None
+    vals = [
+        abs(r.get("funding_rate"))
+        for r in hist
+        if isinstance(r.get("funding_rate"), (int, float))
+    ]
+    if len(vals) < 10:
+        return None
+    if max(vals) == min(vals):
+        return None
+    last = abs(last_raw)
+    return round(sum(1 for x in vals if x <= last) / len(vals) * 100.0, 1)
+
+
+def oi_price_divergence(
+    price_ret: float | None, oi_change: float | None
+) -> dict | None:
+    """OI/价格背离四象限：价 OI 同向 = 新仓进场（趋势确认），背离 = 存量换手。
+
+    confirm_long / weak_long / confirm_short / weak_short / none；
+    输入缺失 → None（UNKNOWN 纪律）；零值 → none（零值无方向）。
+    """
+    if price_ret is None or oi_change is None:
+        return None
+    if price_ret == 0 or oi_change == 0:
+        return {"label": "none", "note": "价格或 OI 变化为零，无法判向"}
+    if price_ret > 0 and oi_change > 0:
+        return {"label": "confirm_long", "note": "价涨 OI 增：新多进场，趋势确认"}
+    if price_ret > 0:
+        return {"label": "weak_long", "note": "价涨 OI 缩：空头回补驱动，持续性弱"}
+    if oi_change > 0:
+        return {"label": "confirm_short", "note": "价跌 OI 增：新空进场，趋势确认"}
+    return {"label": "weak_short", "note": "价跌 OI 缩：存量平仓驱动，趋势健康度弱"}
+
+
 def sentiment_raw(mkt: dict | None, ms: dict | None = None) -> dict:
     """情绪维度：持仓指标原始值直读，不做阈值加减分。
 
@@ -110,12 +157,14 @@ def sentiment_raw(mkt: dict | None, ms: dict | None = None) -> dict:
     return {
         "components": {
             "funding": _v(mkt, "funding"),
+            "funding_pctile_90d": _v(mkt, "funding_pctile_90d"),
             "funding_trend": _v(mkt, "funding_trend"),
             "ls_ratio_all": _v(ms, "ls_ratio_all"),
             "ls_ratio_top_acc": _v(ms, "ls_ratio_top_acc"),
             "ls_ratio_top_pos": _v(ms, "ls_ratio_top_pos"),
             "taker_bs_ratio": _v(ms, "taker_bs_ratio"),
             "oi_change_24h": _v(ms, "oi_change_24h"),
+            "oi_price_divergence": _v(ms, "oi_price_divergence"),
         },
         "note": _SENTIMENT_NOTE,
     }

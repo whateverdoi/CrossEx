@@ -10,7 +10,8 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from strategy_research.env import is_mock_mode
+from strategy_research import review as review_mod
+from strategy_research.env import _MOCK_CALL_COUNTS, is_mock_mode
 
 
 def _write_json(path: Path, obj: dict) -> None:
@@ -24,18 +25,41 @@ def _run_dir() -> Path:
     return Path("reports") / ts
 
 
+def _llm_calls() -> dict:
+    """LLM 调用计数（成本统计）：mock 模式从假模型计数汇总；live 全 0（未启用计数）。"""
+    counts = dict(_MOCK_CALL_COUNTS) if is_mock_mode() else {
+        "facts": 0,
+        "decide": 0,
+        "challenge": 0,
+        "rebuttals": 0,
+    }
+    counts["total"] = sum(v for k, v in counts.items() if k != "total")
+    return counts
+
+
 def build_report(state: dict, meta: dict) -> tuple[Path, dict]:
     """落盘 run.json + overview.md + candidates.json + snapshot/signal_diff。
 
-    09 票扩展：candidates 工件（确定性派生，LLM 不可改）+ 信号快照/对比
-    （先读旧为 prev 再覆盖）。返回 (报告目录, artifacts)。工件/快照异常仅记
-    meta.report_error，不拖累已落盘的 run.json/overview.md。
+    09 票：candidates 工件 + 信号快照/对比（先读旧为 prev 再覆盖）；
+    10 票：overview 五节渲染（币种筛选/信号变化/对抗复审/候选清单/逐币分析）
+    + run.json 成本统计（llm_calls）。返回 (报告目录, artifacts)。工件/快照
+    异常仅记 meta.report_error，不拖累已落盘的 run.json/overview.md。
     """
     run_dir = _run_dir()
     run_dir.mkdir(parents=True, exist_ok=True)
 
     mode = "mock" if is_mock_mode() else "live"
     run_ts = datetime.now(timezone.utc).isoformat()
+    meta["llm_calls"] = _llm_calls()
+
+    # 12 票：决策追踪与校准（独立 try：失败仅记 review_error，不拖累报告；
+    # 此时当前 run.json 尚未落盘，不会被自己扫到）
+    decision_review: dict = {}
+    try:
+        decision_review = review_mod.review_past_decisions()
+    except Exception as exc:  # 同 report_error 纪律：仅记录不中断批
+        meta["review_error"] = f"决策复盘失败: {exc}"
+
     run = {
         "meta": {
             "mode": mode,
@@ -43,22 +67,28 @@ def build_report(state: dict, meta: dict) -> tuple[Path, dict]:
             "screening": meta.get("screening") or {"mode": "manual"},
             "run_ts": run_ts,
             "node_order": meta.get("node_order") or [],
+            "llm_calls": meta["llm_calls"],
         },
         "results": state.get("results") or [],
     }
+    if decision_review:
+        run["decision_review"] = decision_review
     _write_json(run_dir / "run.json", run)
 
-    overview = _render_overview(state, run, meta)
-    (run_dir / "overview.md").write_text(overview, encoding="utf-8")
-
-    # 09：candidates 工件 + 信号快照/对比（独立 try：失败仅记 report_error，不中断批）
+    # 09/10：candidates 工件 + 信号快照/对比（独立 try：失败仅记 report_error）
     artifacts: dict[str, dict] = {s: {} for s in state["tokens"]}
+    signal_diff: dict = {}
     try:
         artifacts = _build_artifacts(state)
         _write_json(run_dir / "candidates.json", artifacts)
-        _write_snapshot_and_diff(state, run_ts, mode)
+        signal_diff = _write_snapshot_and_diff(state, run_ts, mode)
     except Exception as exc:  # 规格：快照/对比失败不中断批
         meta["report_error"] = f"工件/快照落盘失败: {exc}"
+
+    overview = _render_overview(
+        state, run, meta, artifacts, signal_diff, review=decision_review
+    )
+    (run_dir / "overview.md").write_text(overview, encoding="utf-8")
 
     latest = Path("reports") / "latest"
     latest.mkdir(parents=True, exist_ok=True)
@@ -193,25 +223,192 @@ def _write_snapshot_and_diff(state: dict, run_ts: str, mode: str) -> dict:
     return diff
 
 
-def _render_overview(state: dict, run: dict, meta: dict) -> str:
-    """overview.md 骨架：币种筛选节 + 每 token 摘要（空节渲染不报错）。"""
+def _render_overview(
+    state: dict,
+    run: dict,
+    meta: dict,
+    artifacts: dict,
+    signal_diff: dict,
+    review: dict | None = None,
+) -> str:
+    """overview.md 六节：币种筛选 / 信号变化 / 对抗复审 / 候选清单 / 逐币分析 /
+    决策复盘（12 票）。
+
+    空节渲染不报错（无 facts/challenges/diff/review 时输出占位说明，规格十节纪律 2）。
+    """
     lines = [
         "# 策略研究概览",
         "",
         f"- 运行模式：`{run['meta']['mode']}`",
         f"- 时间：{run['meta']['run_ts']}",
         f"- tokens：{', '.join(state['tokens'])}",
+        f"- LLM 调用：{run['meta'].get('llm_calls', {}).get('total', 0)}",
         "",
-        "## 币种筛选",
-        "",
-        f"- 模式：`{run['meta']['screening'].get('mode', 'unknown')}`",
-        "",
-        "## 逐币分析",
-        "",
+        *_screening_lines(meta),
+        *_signal_diff_lines(signal_diff),
+        *_challenge_lines(state),
+        *_artifacts_lines(artifacts, state["tokens"]),
+        *_per_token_lines(state, artifacts),
+        *_review_lines(review),
     ]
+    return "\n".join(lines)
+
+
+def _review_lines(review: dict | None) -> list[str]:
+    """决策复盘节（12 票）：累积命中率 + 置信度分箱 + 本批新回看明细。"""
+    lines = ["## 决策复盘", ""]
+    if not review or not review.get("records"):
+        lines.append("（无到期决策可回看——首次运行或历史不足 7 天）")
+        lines.append("")
+        return lines
+    stats = review.get("stats") or {}
+    lines.append(
+        f"- 累积方向判断 {stats.get('n', 0)} 条，命中率 {stats.get('hit_rate')}；"
+        f"本次回看 {review.get('expired_runs', 0)} 批"
+        f"（待到期 {review.get('pending_runs', 0)} 批）"
+    )
+    for dec, s in (stats.get("by_decision") or {}).items():
+        lines.append(f"- {dec}：{s['n']} 条，命中率 {s['hit_rate']}")
+    lines.append("")
+    lines.append("置信度分箱（T+7d 方向命中）：")
+    lines.append("")
+    lines.append("| 置信度区间 | 条数 | 命中率 |")
+    lines.append("|---|---|---|")
+    for b in stats.get("by_confidence") or []:
+        lines.append(f"| {b['range']} | {b['n']} | {b['hit_rate']} |")
+    new = review.get("new_records") or []
+    if new:
+        lines += ["", "### 本次回看明细", ""]
+        lines.append("| token | 决策 | 方向 | 置信度 | T+1d | T+7d | 命中 |")
+        lines.append("|---|---|---|---|---|---|---|")
+        for r in new:
+            hit = r.get("hit_7d")
+            hit_str = hit if hit is not None else r.get("status", "UNAVAILABLE")
+            lines.append(
+                f"| {r.get('symbol')} | {r.get('decision')} | {r.get('direction')} "
+                f"| {r.get('confidence')} | {r.get('ret_1d')} | {r.get('ret_7d')} "
+                f"| {hit_str} |"
+            )
+    lines.append("")
+    return lines
+
+
+def _screening_lines(meta: dict) -> list[str]:
+    """币种筛选节：模式 + 规则 + 候选带 reason（manual 模式无规则/候选）。"""
+    screening = meta.get("screening") or {"mode": "unknown"}
+    lines = ["## 币种筛选", "", f"- 模式：`{screening.get('mode', 'unknown')}`", ""]
+    rules = screening.get("rules") or []
+    if rules:
+        lines.append("- 规则：" + "、".join(rules))
+        lines.append("")
+    cands = screening.get("candidates") or []
+    if cands:
+        lines.append("- 候选：")
+        for c in cands:
+            lines.append(f"  - {c.get('symbol')}：{c.get('reason', '')}")
+        lines.append("")
+    return lines
+
+
+def _signal_diff_lines(signal_diff: dict) -> list[str]:
+    """信号变化节：对比表（symbol | 上一批 | 当前 | action）；无 prev 空节说明。"""
+    lines = ["## 信号变化（相对上一批）", ""]
+    if not signal_diff:
+        lines.append("（首次运行或快照失败，无上一批对比）")
+        lines.append("")
+        return lines
+    lines.append("| token | 上一批 | 当前 | action |")
+    lines.append("|---|---|---|---|")
+    for symbol, d in signal_diff.items():
+        p = d.get("prev") or {}
+        c = d.get("cur") or {}
+        prev_state = f"{p.get('decision')}/{p.get('direction') or '-'}"
+        cur_state = f"{c.get('decision')}/{c.get('direction') or '-'}"
+        lines.append(f"| {symbol} | {prev_state} | {cur_state} | {d.get('action')} |")
+    lines.append("")
+    return lines
+
+
+def _challenge_lines(state: dict) -> list[str]:
+    """对抗复审节：每 token 挑战（severity/stance/claim/evidence）；无挑战空节。"""
+    lines = ["## 对抗复审", ""]
+    shown = False
     for s in state["tokens"]:
+        chs = (state.get("challenges") or {}).get(s) or []
+        if not chs:
+            continue
+        shown = True
+        lines.append(f"### {s}")
+        for ch in chs[:3]:
+            lines.append(
+                f"- [{ch.get('severity')}/{ch.get('stance')}] {ch.get('claim')}"
+            )
+            lines.append(f"  - 证据：{ch.get('evidence')}")
+        lines.append("")
+    if not shown:
+        lines.append("（无挑战——全部 PASS 透传或对抗未产出）")
+        lines.append("")
+    return lines
+
+
+def _artifacts_lines(artifacts: dict, tokens: list[str]) -> list[str]:
+    """候选清单节：level/流动性/策略/置信度/理由表；无工件空节。"""
+    lines = ["## 候选清单", ""]
+    if not artifacts:
+        lines.append("（本批无候选工件）")
+        lines.append("")
+        return lines
+    lines.append("| token | level | 流动性 | 策略 | 置信度 | 理由 |")
+    lines.append("|---|---|---|---|---|---|")
+    for s in tokens:
+        a = artifacts.get(s) or {}
+        if not a:
+            continue
+        lines.append(
+            f"| {s} | {a.get('opportunity_level', 'D')} | {a.get('liquidity_tier', 'low')} | "
+            f"{a.get('recommended_strategy', 'UNKNOWN')} | {a.get('confidence', 0.0)} | "
+            f"{a.get('rationale', '')} |"
+        )
+    lines.append("")
+    return lines
+
+
+def _per_token_lines(state: dict, artifacts: dict) -> list[str]:
+    """逐币分析节：决策/direction/level/关键事实/挑战与反驳（缺失渲染空节）。"""
+    results = state.get("results") or []
+    lines = ["## 逐币分析", ""]
+    for i, s in enumerate(state["tokens"]):
+        row = results[i] if i < len(results) else {}
+        a = artifacts.get(s) or {}
         lines.append(f"### {s}")
         lines.append("")
-        lines.append("- 决策：-（待 07 票实现）")
+        lines.append(
+            f"- 决策：**{row.get('decision') or 'UNKNOWN'}**"
+            f"（direction: {row.get('direction') or '未声明'}，"
+            f"置信度 {row.get('confidence', 0.0)}，"
+            f"level {a.get('opportunity_level', 'D')}）"
+        )
+        if row.get("downgraded"):
+            lines.append(f"- 风控降级：{'；'.join(row['downgraded'])}")
+        facts = (state.get("facts") or {}).get(s) or []
+        if facts:
+            lines.append("- 关键事实：")
+            for f in facts[:5]:
+                lines.append(
+                    f"  - [{f.get('dimension')}/{f.get('topic')}] "
+                    f"{f.get('claim')}（{f.get('source')}）"
+                )
+        else:
+            lines.append("- 关键事实：（无——事实采证未产出）")
+        chs = (state.get("challenges") or {}).get(s) or []
+        rbs = row.get("rebuttals") or []
+        if chs or rbs:
+            lines.append("- 挑战与反驳：")
+            for ch in chs[:3]:
+                lines.append(f"  - 挑战[{ch.get('severity')}]：{ch.get('claim')}")
+            for rb in rbs:
+                lines.append(f"  - 回应[{rb.get('outcome')}]：{rb.get('response')}")
+        else:
+            lines.append("- 挑战与反驳：（无）")
         lines.append("")
-    return "\n".join(lines)
+    return lines

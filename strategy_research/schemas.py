@@ -332,7 +332,10 @@ _ANALYZE_BODY = (
     "象限 II（基本面弱/价格强）警惕过热；估值比率（mc_fees/fdv_revenue/mc_tvl/fees_tvl，"
     "年化口径）需与同类资产常识区间对比解读。\n"
     "5. 多维度交叉验证：funding 正值且高 = 多头拥挤（反向信号），funding 趋势 up = 拥挤加剧；"
-    "OI 与价格同向放大 = 趋势强；多空人数比/大户持仓比 >1 偏多；"
+    "funding_pctile_90d ≥80 = 费率处于历史极端（拥挤加剧，反向证据更强），≤20 = 费率温和；"
+    "OI 与价格同向放大 = 趋势强（confirm_long/confirm_short 新仓进场，趋势确认），"
+    "背离（weak_long/weak_short） = 存量换手/平仓驱动，趋势健康度弱；"
+    "多空人数比/大户持仓比 >1 偏多；"
     "90d/1Y 涨跌判断中期趋势，弱化短期噪音。\n"
     "6. 近期新闻（bing）只能引用输入中给出的条目，作为催化剂或风险线索，禁止编造新闻内容。\n"
     "7. TRADE 需要同时满足：存在明显错价 + 有催化剂（多头为触发、空头为利空触发）+ 风险可控，"
@@ -365,7 +368,7 @@ CHALLENGE_PROMPT = """你是一名风控对抗官，从三个视角审视给定�
 1. 每条挑战必须包含三要素：claim（反方论断）、evidence（支撑数据，来源+数值，来自输入或工具，禁止编造）、severity（high/medium/low）。
 2. refutes 指向被挑战的决策理由（如 "market_thesis"、"mispricing"、"catalyst"）；对整个决策质疑时留空。
 3. stance 标注视角：aggressive / conservative / neutral；优先使用 conservative（风控默认保守），确有必要才用其他视角。
-4. 优先挑战：催化剂不可靠、错价依据的增长率不可持续、拥挤交易（funding 高+趋势 up）、新闻来源不可信。
+4. 优先挑战：催化剂不可靠、错价依据的增长率不可持续、拥挤交易（funding 高分位 funding_pctile_90d ≥80 或 funding 高+趋势 up）、OI/价格背离的存量换手解读、新闻来源不可信。
 5. 挑战必须可被数据回应：禁止空泛质疑（"市场可能下跌"不算挑战）。
 6. 输出最多 3 条，按 severity 降序。
 7. 输出 JSON：{"challenges": [{"claim": "...", "evidence": "...", "severity": "high|medium|low", "refutes": "...", "stance": "aggressive|conservative|neutral"}]}。"""

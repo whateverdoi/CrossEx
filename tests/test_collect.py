@@ -143,6 +143,7 @@ def test_mock_collect_full_snapshot() -> None:
         "funding",
         "funding_avg_7d",
         "funding_trend",
+        "funding_pctile_90d",
         "oi",
         "basis",
         "taker_buy_ratio_24h",
@@ -156,6 +157,7 @@ def test_mock_collect_full_snapshot() -> None:
     assert mkt["price"]["source"] == "binance"
     assert mkt["basis"]["value"] == 0.0  # fapi 价 == 现货价
     assert mkt["funding_trend"]["value"] in ("rising", "falling", "flat")
+    assert mkt["funding_pctile_90d"]["value"] == 20.0  # mock 费率 5 档周期，最新为最低档
     assert mkt["incomplete"] is False
 
     fund = res["fundamental_data"]["UNI"]
@@ -171,6 +173,7 @@ def test_mock_collect_full_snapshot() -> None:
     ms = res["microstructure_data"]["BTC"]
     assert set(ms) == {
         "oi_change_24h",
+        "oi_price_divergence",
         "oi_change_48h",
         "oi_value_change_24h",
         "ls_ratio_all",
@@ -185,6 +188,8 @@ def test_mock_collect_full_snapshot() -> None:
     assert ms["board"] is None  # PoC 阶段固定 None
     assert ms["oi_change_24h"]["value"] == 0.0  # mock 序列恒定 → 0%
     assert ms["oi_change_48h"]["value"] == 0.0  # 96 点跨 95h，48h 窗口可算
+    # mock oi 变化恒 0 → 背离无方向；价格变化 2.5%（BTC）→ 不缺失
+    assert ms["oi_price_divergence"]["value"]["label"] == "none"
     assert ms["incomplete"] is False
 
     web = res["web_data"]["BTC"]

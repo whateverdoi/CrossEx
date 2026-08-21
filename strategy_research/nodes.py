@@ -117,6 +117,7 @@ def _funding_stats(rows: list[dict] | None) -> tuple[float | None, str | None]:
     )
     if not pts:
         return None, None
+    pts = pts[-25:]  # 7d 统计窗口：仅最近 25 根（270 根仅喂 funding_percentile）
     last = pts[-1]["funding_rate"]
     avg = sum(r["funding_rate"] for r in pts) / len(pts)
     ratio = last / avg if avg else None
@@ -277,10 +278,13 @@ def _market(symbol: str, shared: dict) -> dict:
     )
     if premium is None:
         f_err.append("premium 缺失")
-    funding_rows = binance_futures.fetch_funding_rate_history(exch, limit=25)
+    funding_rows = binance_futures.fetch_funding_rate_history(exch, limit=270)
     avg, trend = _funding_stats(funding_rows)
     mkt["funding_avg_7d"] = _dp(avg, "binance_futures")
     mkt["funding_trend"] = _dp(trend, "binance_futures")
+    mkt["funding_pctile_90d"] = _dp(
+        sig_mod.funding_percentile(funding_rows), "binance_futures"
+    )
     oi_row = binance_futures.fetch_open_interest(exch)
     mkt["oi"] = _dp(oi_row.get("open_interest") if oi_row else None, "binance_futures")
     if oi_row is None:
@@ -308,7 +312,7 @@ def _market(symbol: str, shared: dict) -> dict:
     return mkt, taker
 
 
-def _microstructure(symbol: str, taker: list[dict] | None) -> dict:
+def _microstructure(symbol: str, taker: list[dict] | None, price_ret_24h: float | None) -> dict:
     """微观结构装配：OI 变化 / 多空比 / taker 比（board PoC 阶段 None）。"""
     exch = _exch_symbol(symbol)
     ms: dict[str, Any] = {"board": None, "error": None, "incomplete": False}
@@ -316,8 +320,11 @@ def _microstructure(symbol: str, taker: list[dict] | None) -> dict:
     oi_hist = binance_futures.fetch_open_interest_hist(exch, "1h", 96)
     if oi_hist is None:
         ms["error"] = "openInterestHist 拉取失败"
-    ms["oi_change_24h"] = _dp(
-        _series_pct_change(oi_hist, "sum_open_interest", 24), "binance_futures"
+    oi_change_24h = _series_pct_change(oi_hist, "sum_open_interest", 24)
+    ms["oi_change_24h"] = _dp(oi_change_24h, "binance_futures")
+    ms["oi_price_divergence"] = _dp(
+        sig_mod.oi_price_divergence(price_ret_24h, oi_change_24h),
+        "binance_futures",
     )
     ms["oi_change_48h"] = _dp(
         _series_pct_change(oi_hist, "sum_open_interest", 48), "binance_futures"
@@ -404,6 +411,7 @@ def _error_snapshots(
         "funding",
         "funding_avg_7d",
         "funding_trend",
+        "funding_pctile_90d",
         "oi",
         "basis",
         "taker_buy_ratio_24h",
@@ -419,6 +427,7 @@ def _error_snapshots(
         "ls_ratio_top_acc",
         "ls_ratio_top_pos",
         "taker_bs_ratio",
+        "oi_price_divergence",
     ):
         ms[key] = _dp(None, "binance_futures")
     web_snap: dict[str, Any] = {
@@ -445,7 +454,7 @@ def _one(symbol: str, shared: dict) -> tuple[dict, dict, dict, dict]:
     except Exception as exc:
         mkt, taker = _error_snapshots(symbol, exc)[1], None
     try:
-        ms = _microstructure(symbol, taker)
+        ms = _microstructure(symbol, taker, mkt["change_24h"]["value"])
     except Exception as exc:
         ms = _error_snapshots(symbol, exc)[2]
     try:

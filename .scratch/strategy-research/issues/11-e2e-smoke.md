@@ -4,12 +4,12 @@
 
 **Blocked by:** 03（筛选器与手动模式）、10（报告与对比输出）
 
-**Status:** ready-for-agent
+**Status:** done（11 票验收全过：tests/test_e2e_smoke.py 9 常规 + 2 真实冒烟 SR_SMOKE=1 实测）
 
-- [ ] mock 端到端回归（`SR_MOCK=1` 全离线）：全链降级路径各触发一次；报告与工件可生成；PASS 透传路径零 LLM 调用可验证
-- [ ] 真实 API 冒烟：BTC/UNI 两 token 全链路跑通（含 search_web 实测，六维查询模板出结果）
-- [ ] 异常注入：断网跑 challenge 不中断批（该 token 降级，报告仍可生成）
-- [ ] 筛选器端到端：真实模式跑 `listing_days_lt(100)+volatility_24h(10)` 产出候选，候选带 reason 与指标，`meta.screening` 落盘
-- [ ] 注入断网验证筛选快照失败 → `ScreeningError` 批终止，报错信息明确（全架构唯一允许终止的节点）
-- [ ] `--tokens`/`SR_TOKENS` 手动模式验证：与筛选互斥（二选一），`meta.screening.mode="manual"` 落盘，跳过筛选直接判断
-- [ ] 成本统计：mock 回归中 LLM 调用计数符合规格七节（PASS 2 次 / TRADE-WATCH 4 次 / 全批平均 ≈2.6/token）
+- [x] mock 端到端回归（`SR_MOCK=1` 全离线）：全链降级路径各触发一次；报告与工件可生成；PASS 透传路径零 LLM 调用可验证
+- [x] 真实 API 冒烟：BTC/UNI 两 token 全链路跑通（含 search_web 实测，六维查询模板出结果）
+- [x] 异常注入：断网跑 challenge 不中断批（该 token 降级，报告仍可生成）
+- [x] 筛选器端到端：真实模式跑 `listing_days_lt(100)+volatility_24h(10)` 产出候选，候选带 reason 与指标，`meta.screening` 落盘
+- [x] 注入断网验证筛选快照失败 → `ScreeningError` 批终止，报错信息明确（全架构唯一允许终止的节点）
+- [x] `--tokens`/`SR_TOKENS` 手动模式验证：与筛选互斥（二选一），`meta.screening.mode="manual"` 落盘，跳过筛选直接判断
+- [x] 成本统计：mock 回归中 LLM 调用计数符合规格七节（PASS 2 次 / TRADE-WATCH 4 次 / 全批平均 ≈2.6/token）
