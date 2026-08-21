@@ -1,7 +1,7 @@
 """入口：模式互斥二选一（--tokens/SR_TOKENS 手动 | 筛选器自动）→ 建图。
 
-SR_MOCK=1 全离线回归；01 票骨架：手动/筛选均走 mock 固定候选，
-筛选器完整实现见 03 票（screener.select_tokens）。
+SR_MOCK=1 全离线回归；筛选器 = screener.select_tokens（03 票：
+Filter AND → Rank Top N 零 LLM；快照失败抛 ScreeningError 批终止）。
 """
 
 from __future__ import annotations
@@ -9,9 +9,8 @@ from __future__ import annotations
 import argparse
 import os
 
-from strategy_research.datasources.mock import mock_screening_candidates
-from strategy_research.env import is_mock_mode
 from strategy_research.graph import build_graph
+from strategy_research.screener import DEFAULT_RULES, select_tokens
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -26,24 +25,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def _resolve_tokens(args: argparse.Namespace) -> tuple[list[str], dict]:
-    """tokens 解析：--tokens/SR_TOKENS 手动优先，否则筛选（01 票：mock 候选）。"""
+    """tokens 解析：--tokens/SR_TOKENS 手动优先，否则确定性筛选（互斥二选一）。"""
     manual = args.tokens or os.environ.get("SR_TOKENS", "")
     if manual:
         tokens = [t.strip().upper() for t in manual.split(",") if t.strip()]
         return tokens, {"mode": "manual"}
-    if is_mock_mode():
-        cands = mock_screening_candidates()
-    else:
-        # 03 票：screener.select_tokens(rules, top_n)；未实现前显式失败，
-        # 禁止真实模式静默回退 mock（规格十节纪律 6/9）
-        raise NotImplementedError(
-            "auto 模式筛选器未实现（03 票）；请设置 SR_MOCK=1 或使用 --tokens"
-        )
-    tokens = [c["symbol"] for c in cands]
+    result = select_tokens(DEFAULT_RULES, top_n=args.top_n)
+    tokens = [c["symbol"] for c in result.candidates]
     return tokens, {
-        "mode": "auto",
-        "rules": [],
-        "candidates": cands,
+        "mode": result.mode,
+        "rules": result.rules,
+        "candidates": result.candidates,
     }
 
 
