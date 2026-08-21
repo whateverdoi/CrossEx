@@ -13,6 +13,11 @@ from pathlib import Path
 from strategy_research.env import is_mock_mode
 
 
+def _write_json(path: Path, obj: dict) -> None:
+    """统一落盘：JSON 序列化写文件（ensure_ascii=False + indent=2）。"""
+    path.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def _run_dir() -> Path:
     """reports/<ts>/ 运行目录 + reports/latest/ 软链目标（微秒级防同秒碰撞）。"""
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ%f")
@@ -41,20 +46,16 @@ def build_report(state: dict, meta: dict) -> tuple[Path, dict]:
         },
         "results": state.get("results") or [],
     }
-    (run_dir / "run.json").write_text(
-        json.dumps(run, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    _write_json(run_dir / "run.json", run)
 
     overview = _render_overview(state, run, meta)
     (run_dir / "overview.md").write_text(overview, encoding="utf-8")
 
     # 09：candidates 工件 + 信号快照/对比（独立 try：失败仅记 report_error，不中断批）
-    artifacts: dict[str, dict] = {}
+    artifacts: dict[str, dict] = {s: {} for s in state["tokens"]}
     try:
         artifacts = _build_artifacts(state)
-        (run_dir / "candidates.json").write_text(
-            json.dumps(artifacts, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        _write_json(run_dir / "candidates.json", artifacts)
         _write_snapshot_and_diff(state, run_ts, mode)
     except Exception as exc:  # 规格：快照/对比失败不中断批
         meta["report_error"] = f"工件/快照落盘失败: {exc}"
@@ -145,7 +146,7 @@ def _read_prev_snapshot() -> dict | None:
     path = Path("reports") / "latest" / "snapshot.json"
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError):  # 含 JSONDecodeError/UnicodeDecodeError
         return None
 
 
@@ -186,13 +187,9 @@ def _write_snapshot_and_diff(state: dict, run_ts: str, mode: str) -> dict:
     latest.mkdir(parents=True, exist_ok=True)
     snapshot = _build_snapshot(state, run_ts, mode)
     prev = _read_prev_snapshot()
-    (latest / "snapshot.json").write_text(
-        json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    _write_json(latest / "snapshot.json", snapshot)
     diff = _build_signal_diff(prev, snapshot)
-    (latest / "signal_diff.json").write_text(
-        json.dumps(diff, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    _write_json(latest / "signal_diff.json", diff)
     return diff
 
 

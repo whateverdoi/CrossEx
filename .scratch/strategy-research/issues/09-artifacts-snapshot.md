@@ -26,4 +26,7 @@
 
 - **overview.md 新节（对抗复审/候选清单/信号变化）归 10 票**：09 票验收仅工件派生与快照；规格 ⑧ 的 overview 渲染三节与 10 票"报告与对比输出"验收（币种筛选节/信号变化节/逐币摘要/五个工件一致性）重叠，渲染留给 10 票，本票只保证工件落盘正确。
 - **llm_calls 归 10 票**：规格 state 表与 run.json 的 `llm_calls`（累计调用与失败记录）无现成实现，09 票验收未列；10 票"成本统计"验收承载。
-- **损坏快照视为无 prev**：规格未定义损坏场景；按"快照失败不中断批"精神，JSON 损坏 → None（首次运行语义，全 new），不抛异常。
+- **损坏快照视为无 prev**：规格未定义损坏场景；按"快照失败不中断批"精神，JSON/UTF-8 损坏 → None（首次运行语义，全 new），不抛异常（补修：`except (OSError, ValueError)` 覆盖 UnicodeDecodeError）。
+- **快照覆盖式语义（code-review 补裁决）**：规格附注"历史运行在 reports/<ts>/"——历史状态由 `reports/<ts>/run.json` 的 results 承载（每批已落盘），快照本身是 latest 单文件覆盖（失效机制的"当前状态"），不做历史归档。
+- **run.json 条目说明（code-review 补裁决）**：规格 L665 "run.json 条目追加 rebuttals / risk_flags / llm_calls"——rebuttals/risk_flags 已嵌套于 results 条目（08 票），llm_calls 属 meta 成本统计归 10 票。
+- **补修（code-review）**：落盘模式提取 `_write_json` 消除 4 处重复；build_report 失败兜底 artifacts 统一为 `{s: {} for s in tokens}`（与 write_report 异常兜底形状一致）。

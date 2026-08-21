@@ -231,6 +231,17 @@ def test_first_run_diff_all_new(monkeypatch, tmp_path):
     assert diff["ETH"]["action"] == "new"
 
 
+def test_corrupt_snapshot_treated_as_no_prev(monkeypatch, tmp_path):
+    """损坏快照（非法 UTF-8/坏 JSON）→ 视为无 prev（首次运行语义），不抛异常。"""
+    monkeypatch.chdir(tmp_path)
+    latest = Path("reports") / "latest"
+    latest.mkdir(parents=True)
+    (latest / "snapshot.json").write_bytes(b"\xff\xfe\x00broken")
+    assert report._read_prev_snapshot() is None
+    (latest / "snapshot.json").write_text("{not json", encoding="utf-8")
+    assert report._read_prev_snapshot() is None
+
+
 def test_artifacts_failure_records_report_error(monkeypatch, tmp_path):
     """失败语义：工件失败仅记 report_error，run.json/overview 不丢，批不中断。"""
     monkeypatch.chdir(tmp_path)
@@ -245,7 +256,7 @@ def test_artifacts_failure_records_report_error(monkeypatch, tmp_path):
     assert "工件/快照落盘失败" in meta["report_error"]
     assert (run_dir / "run.json").is_file()
     assert (run_dir / "overview.md").is_file()
-    assert artifacts == {}
+    assert artifacts == {"BTC": {}}  # 兜底形状与 write_report 异常路径一致
     assert not (run_dir / "candidates.json").exists()  # 失败工件不落盘
 
 
