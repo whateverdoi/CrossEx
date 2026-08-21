@@ -10,13 +10,30 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+from langchain.agents import create_agent
+
 from strategy_research import env
 from strategy_research import signals as sig_mod
 from strategy_research.datasources import binance, binance_futures, defillama, mock
 from strategy_research.datasources import web as web_ds
+from strategy_research.schemas import (
+    CHALLENGE_PROMPT,
+    DECIDE_PROMPT,
+    FACTS_PROMPT,
+    FINALIZE_PROMPT,
+    ChallengeItem,
+    FactItem,
+    RebuttalItem,
+    TokenAnalysis,
+    _extract_json,
+)
+from strategy_research.tools import CHALLENGE_TOOLS, FACTS_TOOLS
 
 #: 计价后缀（与 defillama._strip_quote 一致，用于裸名补全）
 _QUOTES = ("USDT", "USDC", "BUSD", "FDUSD", "TUSD", "DAI")
+
+#: ③⑤ react agent 递归上限（防工具循环失控，规格）
+AGENT_RECURSION_LIMIT = 8
 
 
 # ── ① collect_data：共享资源 + per-token 装配 ───────────────
@@ -521,40 +538,418 @@ def compute_signals(state: dict) -> dict:
     return {"signals": signals_out, "meta": meta}
 
 
+# ── ③-⑥ LLM 链：摘要构建 + 单 token 调用（07 票）──────────────────
+
+_DIM_ORDER = ("fundamentals", "market", "sentiment", "news")
+
+
+def _dp_text(dp: dict | None, decimals: int = 2) -> str:
+    """四元组 → 数值文本（费率等小数值用 decimals 保精度）；缺失 → UNKNOWN。"""
+    v = (dp or {}).get("value")
+    if v is None:
+        return "UNKNOWN"
+    if isinstance(v, float):
+        return f"{v:.{decimals}f}"
+    return str(v)
+
+
+def _pct_text(dp: dict | None) -> str:
+    """百分比字段渲染（value 本身是 % 数值）；缺失 → UNKNOWN。"""
+    v = (dp or {}).get("value")
+    return "UNKNOWN" if v is None else f"{v:.2f}%"
+
+
+def _num_text(value: Any) -> str:
+    """裸数值 → 2 位小数文本；非数值 → UNKNOWN。"""
+    return "UNKNOWN" if not isinstance(value, (int, float)) else f"{value:.2f}"
+
+
+def _signal_lines(symbol: str, state: dict) -> list[str]:
+    """信号节渲染（③④⑤⑥ 摘要共用）：估值/动量/背离/情绪原始直读。"""
+    sig = (state.get("signals") or {}).get(symbol) or {}
+    lines: list[str] = []
+    val = (sig.get("valuation") or {}).get("value") or {}
+    if val:
+        lines.append(
+            "valuation: " + " ".join(f"{k}={_num_text(v)}" for k, v in val.items())
+        )
+    else:
+        lines.append("valuation: UNKNOWN")
+    mom = (sig.get("momentum") or {}).get("value")
+    lines.append(f"momentum: {_num_text(mom)}")
+    div = (sig.get("divergence") or {}).get("value") or {}
+    lines.append(
+        "divergence: "
+        + " ".join(
+            (
+                f"divergence_7d={_num_text(div.get('divergence_7d'))}",
+                f"divergence_30d={_num_text(div.get('divergence_30d'))}",
+                f"quadrant={div.get('quadrant') or 'None'}",
+            )
+        )
+    )
+    sent = (sig.get("sentiment") or {}).get("components") or {}
+    if sent:
+        lines.append(
+            "sentiment: "
+            + " ".join(f"{k}={v if v is not None else 'None'}" for k, v in sent.items())
+        )
+    else:
+        lines.append("sentiment: UNKNOWN")
+    return lines
+
+
+def _facts_summary_lines(symbol: str, state: dict) -> list[str]:
+    """确定性快照 → LLM 摘要骨架（③④ 共用）。
+
+    只喂数字 + 变化率 + source 标签（含微观结构节）；缺失一律 UNKNOWN；
+    新闻 ≤3 条；总行数 ≤50（约 1200 token/token，规格 ③-1）。
+    """
+    fund = (state.get("fundamental_data") or {}).get(symbol) or {}
+    mkt = (state.get("market_data") or {}).get(symbol) or {}
+    ms = (state.get("microstructure_data") or {}).get(symbol) or {}
+    web = (state.get("web_data") or {}).get(symbol) or {}
+    lines = [f"研究标的: {symbol}", "", "== 基本面（defillama）=="]
+    kind = fund.get("kind") or "unknown"
+    name = fund.get("name")
+    lines.append(f"kind: {kind}" + (f" ({name})" if name else ""))
+    for key in (
+        "tvl",
+        "tvl_change_1d",
+        "tvl_change_7d",
+        "tvl_change_30d",
+        "mcap",
+        "fdv",
+    ):
+        lines.append(f"{key}: {_dp_text(fund.get(key))}")
+    if kind == "protocol":
+        for key in ("fees_24h", "fees_7d", "revenue_24h", "revenue_7d"):
+            lines.append(f"{key}: {_dp_text(fund.get(key))}")
+    else:
+        for key in ("stablecoin_supply", "dex_volume_24h"):
+            lines.append(f"{key}: {_dp_text(fund.get(key))}")
+    lines += ["", "== 市场（binance / binance_futures）=="]
+    for key in ("price", "quote_volume_24h"):
+        lines.append(f"{key}: {_dp_text(mkt.get(key))}")
+    for key in ("change_24h", "change_7d", "change_30d", "change_90d", "change_1y"):
+        lines.append(f"{key}: {_pct_text(mkt.get(key))}")
+    lines.append(
+        f"funding: {_dp_text(mkt.get('funding'), 6)}"
+        f" funding_avg_7d: {_dp_text(mkt.get('funding_avg_7d'), 6)}"
+        f" funding_trend: {_dp_text(mkt.get('funding_trend'))}"
+    )
+    lines.append(f"oi: {_dp_text(mkt.get('oi'))} basis: {_pct_text(mkt.get('basis'))}")
+    lines.append(
+        f"taker_buy_ratio_24h: {_dp_text(mkt.get('taker_buy_ratio_24h'))}"
+        f" listing_days: {_dp_text(mkt.get('listing_days'))}"
+    )
+    lines += ["", "== 微观结构（binance_futures）=="]
+    for key in (
+        "oi_change_24h",
+        "oi_change_48h",
+        "oi_value_change_24h",
+        "ls_ratio_all",
+        "ls_ratio_all_change_24h",
+        "ls_ratio_top_acc",
+        "ls_ratio_top_pos",
+        "taker_bs_ratio",
+    ):
+        lines.append(f"{key}: {_dp_text(ms.get(key))}")
+    lines += ["", "== 信号（确定性计算）=="]
+    lines += _signal_lines(symbol, state)
+    lines += ["", "== 新闻（bing，≤3 条）=="]
+    items = (web.get("items") or [])[:3]
+    if not items:
+        lines.append("UNKNOWN")
+    for it in items:
+        lines.append(
+            f"{it.get('date')} | {it.get('title')} (source: {it.get('source')})"
+        )
+    return lines
+
+
+def _build_facts_summary(symbol: str, state: dict) -> str:
+    """③ 事实摘要：骨架 + 指令行（只提取证据，禁止结论）。"""
+    return "\n".join(
+        [*_facts_summary_lines(symbol, state), "", "只提取证据，禁止结论。"]
+    )
+
+
+def _build_decide_summary(symbol: str, state: dict) -> str:
+    """④ 决策摘要：骨架 + 事实证据节（按 dimension 分组，≤10 条）。"""
+    lines = _facts_summary_lines(symbol, state)
+    lines += ["", "== 事实证据（research_facts 产出）=="]
+    facts = (state.get("facts") or {}).get(symbol) or []
+    if not facts:
+        lines.append("仅依据确定性信号")
+    else:
+        shown = 0
+        for dim in _DIM_ORDER:
+            for f in facts:
+                if f.get("dimension") != dim:
+                    continue
+                lines.append(
+                    f"[{dim}/{f.get('direction')}] {f.get('claim')}"
+                    f" ({f.get('source')}, {f.get('timestamp')})"
+                )
+                shown += 1
+                if shown >= 10:
+                    break
+            if shown >= 10:
+                break
+        if not shown:
+            lines.append("仅依据确定性信号")
+    return "\n".join(lines)
+
+
+def _decision_lines(symbol: str, state: dict) -> list[str]:
+    """原决策全文渲染（⑤⑥ 摘要共用）。"""
+    dec = (state.get("decisions") or {}).get(symbol) or {}
+    lines = ["== 原决策 =="]
+    lines.append(f"symbol: {dec.get('symbol') or symbol}")
+    lines.append(
+        f"decision: {dec.get('decision') or 'UNKNOWN'}"
+        f" direction: {dec.get('direction') or '未声明'}"
+        f" confidence: {dec.get('confidence') or 0.0}"
+    )
+    for key in (
+        "fundamental_thesis",
+        "market_thesis",
+        "market_implied_expectation",
+        "mispricing",
+        "catalyst",
+        "data_quality",
+        "valuation_summary",
+        "trade_structure",
+    ):
+        v = dec.get(key)
+        if v:
+            lines.append(f"{key}: {v}")
+    score = dec.get("fundamental_score")
+    if score is not None:
+        lines.append(f"fundamental_score: {score}")
+    quad = dec.get("quadrant")
+    if quad:
+        lines.append(f"quadrant: {quad}")
+    risks = dec.get("risks") or []
+    if risks:
+        lines.append("risks: " + "; ".join(risks))
+    ev = dec.get("evidence") or []
+    if ev:
+        lines.append(
+            "evidence: "
+            + "; ".join(
+                f"[{e.get('claim')} ({e.get('source')}, {e.get('timestamp')})]"
+                for e in ev
+            )
+        )
+    return lines
+
+
+def _build_challenge_summary(symbol: str, state: dict) -> str:
+    """⑤ 对抗摘要：决策全文 + 反方事实预筛（按决策方向取反）+ 信号。"""
+    dec = (state.get("decisions") or {}).get(symbol) or {}
+    lines = _decision_lines(symbol, state)
+    lines += ["", "== 反方事实（预筛：多头取 bear / 空头取 bull）=="]
+    facts = (state.get("facts") or {}).get(symbol) or []
+    direction = dec.get("direction")
+    if direction == "long":
+        picked = [f for f in facts if f.get("direction") == "bear"]
+    elif direction == "short":
+        picked = [f for f in facts if f.get("direction") == "bull"]
+    else:
+        picked = list(facts)
+    if not picked:
+        lines.append("无反方事实（或 facts 为空）")
+    for f in picked:
+        lines.append(
+            f"[{f.get('direction')}/{f.get('dimension')}/{f.get('topic')}]"
+            f" {f.get('claim')} ({f.get('source')}, {f.get('timestamp')})"
+        )
+    lines += ["", "== 信号（确定性计算）=="]
+    lines += _signal_lines(symbol, state)
+    return "\n".join(lines)
+
+
+def _build_finalize_summary(symbol: str, state: dict) -> str:
+    """⑥ 复审摘要：原决策 + 全部挑战（含 severity/refutes/stance）+ 信号。"""
+    chs = (state.get("challenges") or {}).get(symbol) or []
+    lines = _decision_lines(symbol, state)
+    lines += ["", "== 反方挑战（≤3 条）=="]
+    for c in chs:
+        lines.append(
+            f"[{c.get('severity')}/{c.get('stance')}] {c.get('claim')}"
+            f" (refutes: {c.get('refutes') or '整体'})"
+        )
+        lines.append(f"  证据: {c.get('evidence')}")
+    lines += ["", "== 信号（确定性计算）=="]
+    lines += _signal_lines(symbol, state)
+    return "\n".join(lines)
+
+
+def _collect_facts(symbol: str, state: dict) -> list[dict]:
+    """③ 单 token 采证：react agent + 宽容解析；坏条目丢弃；异常 → []。"""
+    items: list[dict] = []
+    try:
+        summary = _build_facts_summary(symbol, state)
+        agent = create_agent(env.get_llm(), FACTS_TOOLS, system_prompt=FACTS_PROMPT)
+        result = agent.invoke(
+            {"messages": [("human", summary)]},
+            config={"recursion_limit": AGENT_RECURSION_LIMIT},
+        )
+        obj = _extract_json(result["messages"][-1].content)
+        for x in (obj or {}).get("facts") or []:
+            try:
+                item = FactItem.model_validate(x).model_dump()
+                if item["claim"] and item["source"]:
+                    items.append(item)
+            except Exception:  # noqa: S112 —— 坏条目丢弃（规格 ③-4）
+                continue
+    except Exception:  # noqa: S110 —— 异常 → facts=[]，④ 只见确定性信号（规格 ③ 失败矩阵）
+        pass
+    return items
+
+
 def research_facts(state: dict) -> dict:
-    """③ 采证（LLM）：四分析师视角 facts。07 票完整实现。"""
+    """③ 采证（LLM）：四分析师视角 facts（07 票）。
+
+    每 token 串行：react agent（FACTS_TOOLS 5 工具）采证 → 宽容解析 →
+    坏条目丢弃；单 token 异常 → facts=[]（④ 只见确定性信号）；批不中断。
+    """
     meta, order = _meta(state)
     order.append("research_facts")
     meta["node_order"] = order
-    return {"facts": {s: [] for s in state["tokens"]}, "meta": meta}
+    return {
+        "facts": {s: _collect_facts(s, state) for s in state["tokens"]},
+        "meta": meta,
+    }
+
+
+def _invoke_analysis(symbol: str, state: dict) -> dict:
+    """④ 单 token 决策：json_mode 单次调用 + _extract_json 宽容解析。
+
+    异常/不可解析 → PASS 兜底（保守原则，fallback 记录可审计）。
+    """
+    try:
+        summary = _build_decide_summary(symbol, state)
+        out = (
+            env.get_llm(json_mode=True)
+            .with_retry(stop_after_attempt=2)
+            .invoke([("system", DECIDE_PROMPT), ("human", summary)])
+        )
+        obj = _extract_json(getattr(out, "content", out))
+        if not isinstance(obj, dict):
+            raise TypeError("json_mode 输出不可解析")
+        return TokenAnalysis.model_validate(obj).model_dump()
+    except Exception as exc:
+        return {
+            "symbol": symbol,
+            "decision": "PASS",
+            "confidence": 0.0,
+            "error": f"LLM 分析失败: {exc}",
+            "fallback": "json_mode",
+        }
 
 
 def decide(state: dict) -> dict:
-    """④ 决策（LLM）：json_mode 单次调用。07 票完整实现。"""
+    """④ 决策（LLM）：json_mode 单次调用，禁止 tools（07 票）。
+
+    摘要 = 确定性骨架 + 事实证据节（按 dimension 分组）；异常 → PASS 兜底，
+    fallback 记录；批不中断。
+    """
     meta, order = _meta(state)
     order.append("decide")
     meta["node_order"] = order
-    return {"decisions": {s: {} for s in state["tokens"]}, "meta": meta}
+    return {
+        "decisions": {s: _invoke_analysis(s, state) for s in state["tokens"]},
+        "meta": meta,
+    }
+
+
+def _invoke_challenge(symbol: str, state: dict) -> list[dict]:
+    """⑤ 单 token 对抗：PASS 透传零调用；非 PASS react agent，截断 ≤3 条。"""
+    dec = (state.get("decisions") or {}).get(symbol) or {}
+    if dec.get("decision") == "PASS":
+        return []
+    items: list[dict] = []
+    try:
+        summary = _build_challenge_summary(symbol, state)
+        agent = create_agent(
+            env.get_llm(), CHALLENGE_TOOLS, system_prompt=CHALLENGE_PROMPT
+        )
+        result = agent.invoke(
+            {"messages": [("human", summary)]},
+            config={"recursion_limit": AGENT_RECURSION_LIMIT},
+        )
+        obj = _extract_json(result["messages"][-1].content)
+        for x in (obj or {}).get("challenges") or []:
+            try:
+                items.append(ChallengeItem.model_validate(x).model_dump())
+            except Exception:  # noqa: S112 —— 单条丢弃（规格 ⑤ 失败矩阵）
+                continue
+    except Exception:  # noqa: S110 —— 异常 → 空列表，⑥ 维持（规格 ⑤ 失败矩阵）
+        pass
+    return items[:3]
 
 
 def challenge(state: dict) -> dict:
-    """⑤ 对抗（LLM）：PASS 透传，非 PASS 挖反方。07 票完整实现。"""
+    """⑤ 对抗（LLM）：PASS 透传零调用，非 PASS 挖反方（07 票）。
+
+    反方事实预筛按决策方向取反（多头取 bear / 空头取 bull）；
+    单 token 异常 → 空列表（⑥ 维持）；批不中断。
+    """
     meta, order = _meta(state)
     order.append("challenge")
     meta["node_order"] = order
-    return {"challenges": {s: [] for s in state["tokens"]}, "meta": meta}
+    return {
+        "challenges": {s: _invoke_challenge(s, state) for s in state["tokens"]},
+        "meta": meta,
+    }
+
+
+def _invoke_rebuttals(symbol: str, state: dict) -> dict:
+    """⑥ 单 token 复审：无挑战透传；逐条 rebutted/accepted，accepted 只降不升。"""
+    dec = (state.get("decisions") or {}).get(symbol) or {}
+    chs = (state.get("challenges") or {}).get(symbol) or []
+    if not chs:
+        return {"analysis": dec, "rebuttals": []}
+    try:
+        summary = _build_finalize_summary(symbol, state)
+        out = (
+            env.get_llm(json_mode=True)
+            .with_retry(stop_after_attempt=2)
+            .invoke([("system", FINALIZE_PROMPT), ("human", summary)])
+        )
+        obj = _extract_json(getattr(out, "content", out))
+        rebuttals: list[dict] = []
+        for x in (obj or {}).get("rebuttals") or []:
+            try:
+                rebuttals.append(RebuttalItem.model_validate(x).model_dump())
+            except Exception:  # noqa: S112 —— 单条丢弃（规格 ⑥ 失败矩阵）
+                continue
+        analysis = dict(dec)
+        for rb in rebuttals:
+            if rb["outcome"] == "accepted":
+                analysis["decision"] = "WATCH"  # 只降不升
+                analysis["confidence"] = round(
+                    max(0.0, float(analysis.get("confidence", 0.0)) - 0.1), 2
+                )
+                analysis["risks"] = list(analysis.get("risks") or []) + [rb["response"]]
+        return {"analysis": analysis, "rebuttals": rebuttals}
+    except Exception:
+        return {"analysis": dec, "rebuttals": []}
 
 
 def finalize(state: dict) -> dict:
-    """⑥ 复审（LLM）：逐条 rebutted/accepted，accepted 只降不升。07 票完整实现。"""
+    """⑥ 复审（LLM）：逐条 rebutted/accepted，accepted 只降不升（07 票）。
+
+    无挑战透传零调用；单 token 异常 → 维持原决策；批不中断。
+    """
     meta, order = _meta(state)
     order.append("finalize")
     meta["node_order"] = order
     return {
-        "final_decisions": {
-            s: {"analysis": state.get("decisions", {}).get(s) or {}, "rebuttals": []}
-            for s in state["tokens"]
-        },
+        "final_decisions": {s: _invoke_rebuttals(s, state) for s in state["tokens"]},
         "meta": meta,
     }
 
