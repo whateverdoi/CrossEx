@@ -306,3 +306,137 @@ def mock_web_rss(query: str) -> list[dict]:
         }
         for i in range(3)
     ]
+
+
+#: sentiment 解读规则（与 signals.sentiment_raw 的 note 同构）
+_SENTIMENT_NOTE = (
+    "持仓指标原始直读；解读规则见 DECIDE_PROMPT（funding 高=拥挤反向，多空比高=偏多等）"
+)
+
+
+#: mock 持仓指标原始值中与序列无关的固定部分（序列派生值见 _mock_funding_trend）
+_MOCK_SENTIMENT_FIXED = {
+    "funding": 0.0001,
+    "ls_ratio_all": 1.05,
+    "ls_ratio_top_acc": 1.2,
+    "ls_ratio_top_pos": 1.1,
+    "taker_bs_ratio": 1.0,
+    "oi_change_24h": 0.0,
+}
+
+#: 估值常量的 mock 固定输入（与 mock_protocol_tvl/mock_protocol_fees 一致）
+_MOCK_MCAP, _MOCK_FDV = 500.0, 800.0
+
+
+#: 全 None 估值（chain 无 mcap/fdv/fees / unknown 全缺，与真实结构性缺失同构）
+_VALUATION_NONE = {
+    "value": {
+        "mc_fees": None,
+        "fdv_revenue": None,
+        "mc_tvl": None,
+        "fees_tvl": None,
+    }
+}
+
+
+def _slug_for(symbol: str) -> str:
+    """mock 模式协议 slug：静态映射优先，否则 mock_protocols 兜底（同 ① 解析）。"""
+    from .defillama import (
+        TOKEN_SLUG_MAP,  # 延迟导入避免循环（defillama 模块级 import mock）
+    )
+
+    return TOKEN_SLUG_MAP.get(symbol) or f"{symbol.lower()}-mock"
+
+
+def _price_ret(symbol: str, days: int) -> float | None:
+    """mock 日线 N 日收益率 %（与 nodes._ret 同口径）。"""
+    klines = mock_klines(symbol)
+    if not klines or len(klines) < days + 2:
+        return None
+    last = klines[-1].get("close_price")
+    prev = klines[-1 - days].get("close_price")
+    if last is None or prev in (None, 0):
+        return None
+    return (last / prev - 1.0) * 100.0
+
+
+def _funding_trend(symbol: str) -> str | None:
+    """mock 资金费率趋势（与 nodes._funding_stats 同口径：最新 vs 均值 ±10%）。"""
+    pts = sorted(
+        (
+            r
+            for r in mock_funding_rate_history(symbol)
+            if isinstance(r.get("funding_rate"), (int, float))
+        ),
+        key=lambda r: r.get("funding_time") or 0,
+    )
+    if not pts:
+        return None
+    last = pts[-1]["funding_rate"]
+    avg = sum(r["funding_rate"] for r in pts) / len(pts)
+    ratio = last / avg if avg else None
+    if ratio is None:
+        return None
+    if ratio > 1.1:
+        return "rising"
+    if ratio < 0.9:
+        return "falling"
+    return "flat"
+
+
+def _mock_valuation(symbol: str, kind: str | None) -> dict:
+    """mock 估值比率：protocol 从 mock 协议数据年化推导，其余全 None。"""
+    if kind != "protocol":
+        return dict(_VALUATION_NONE)
+    slug = _slug_for(symbol)
+    tvl = mock_protocol_tvl(slug)["tvl"]
+    fees = mock_protocol_fees(slug)["fees_24h"]
+    revenue = mock_protocol_fees(slug)["revenue_24h"]
+    return {
+        "value": {
+            "mc_fees": _MOCK_MCAP / (fees * 365.0),
+            "fdv_revenue": _MOCK_FDV / (revenue * 365.0),
+            "mc_tvl": _MOCK_MCAP / tvl,
+            "fees_tvl": (fees * 365.0) / tvl,
+        }
+    }
+
+
+def mock_signals_data(symbol: str, kind: str | None = None) -> dict:
+    """② 信号层 mock：值从 mock 数据源推导，与同一快照上的纯函数输出一致。
+
+    protocol → 估值全字段（年化口径）；chain → 估值全 None（结构性缺失同构）；
+    unknown → 全 None（UNKNOWN 纪律）。
+    """
+    if kind is None:
+        momentum: float | None = None
+        divergence: dict = {
+            "divergence_7d": None,
+            "divergence_30d": None,
+            "quadrant": None,
+        }
+    else:
+        # tvl_change_7d/30d 恒 2.5/10.0（mock_chain_tvl/mock_protocol_tvl 固定）
+        momentum = (2.5 + 10.0) / 2.0
+        change_7d = _price_ret(symbol, 7)
+        change_30d = _price_ret(symbol, 30)
+        div7 = 2.5 - change_7d if change_7d is not None else None
+        div30 = 10.0 - change_30d if change_30d is not None else None
+        quad: str | None = None
+        if change_7d is not None:
+            quad = "III" if change_7d <= 0 else "I"
+        divergence = {"divergence_7d": div7, "divergence_30d": div30, "quadrant": quad}
+    return {
+        "symbol": symbol,
+        "valuation": _mock_valuation(symbol, kind),
+        "momentum": {"value": momentum},
+        "divergence": {"value": divergence},
+        "sentiment": {
+            "components": {
+                **_MOCK_SENTIMENT_FIXED,
+                "funding_trend": _funding_trend(symbol),
+            },
+            "note": _SENTIMENT_NOTE,
+        },
+        "error": None,
+    }

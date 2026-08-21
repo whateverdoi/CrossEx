@@ -10,7 +10,9 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from strategy_research.datasources import binance, binance_futures, defillama
+from strategy_research import env
+from strategy_research import signals as sig_mod
+from strategy_research.datasources import binance, binance_futures, defillama, mock
 from strategy_research.datasources import web as web_ds
 
 #: 计价后缀（与 defillama._strip_quote 一致，用于裸名补全）
@@ -488,16 +490,35 @@ def collect_data(state: dict) -> dict:
 
 
 def compute_signals(state: dict) -> dict:
-    """② 信号计算（确定性）：估值/动量/背离/sentiment_raw。05 票完整实现。"""
+    """② 信号计算（确定性）：估值/动量/背离/sentiment_raw（05 票）。
+
+    mock 模式走 mock.mock_signals_data（同构字段，kind 分支与真实一致）；
+    真实模式 per-token 调 4 个纯函数；单 token 异常置 {symbol, error} 不阻断。
+    """
     meta, order = _meta(state)
     order.append("compute_signals")
     meta["node_order"] = order
-    return {
-        "signals": {
-            s: {"symbol": s, "error": "未实现（05 票）"} for s in state["tokens"]
-        },
-        "meta": meta,
-    }
+    signals_out: dict[str, Any] = {}
+    for symbol in state["tokens"]:
+        try:
+            if env.is_mock_mode():
+                kind = (state.get("fundamental_data", {}).get(symbol) or {}).get("kind")
+                signals_out[symbol] = mock.mock_signals_data(symbol, kind)
+            else:
+                fund = state.get("fundamental_data", {}).get(symbol)
+                mkt = state.get("market_data", {}).get(symbol)
+                ms = state.get("microstructure_data", {}).get(symbol)
+                signals_out[symbol] = {
+                    "symbol": symbol,
+                    "valuation": sig_mod.valuation_ratios(fund, mkt),
+                    "momentum": sig_mod.momentum_score(fund),
+                    "divergence": sig_mod.divergence(fund, mkt),
+                    "sentiment": sig_mod.sentiment_raw(mkt, ms),
+                    "error": None,
+                }
+        except Exception as exc:  # 单 token 异常不阻断（规格 ②）
+            signals_out[symbol] = {"symbol": symbol, "error": f"信号计算异常: {exc}"}
+    return {"signals": signals_out, "meta": meta}
 
 
 def research_facts(state: dict) -> dict:
