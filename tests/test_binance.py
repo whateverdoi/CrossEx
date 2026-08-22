@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 from typing import ClassVar
 
 import pytest
@@ -243,3 +244,95 @@ def test_fetch_ticker_24h_all_real_maps_fields(monkeypatch: pytest.MonkeyPatch) 
             "quote_volume": 90000.0,
         },
     ]
+
+
+# ── 日线收益单一口径（预测能力 02 票：适配器唯一实现） ──
+
+
+_DAY_MS = 86_400_000
+_ANCHOR = datetime(2026, 8, 13, tzinfo=timezone.utc)  # 决策日 00:00 UTC
+_ANCHOR_MS = int(_ANCHOR.timestamp() * 1000)
+_RUN_TS_MS = _ANCHOR_MS + 12 * 3_600_000  # 决策发生在当日盘中
+
+
+def _kline_rows(spec: dict[int, float], anchor_ms: int = _ANCHOR_MS) -> list[dict]:
+    """造日线：spec = {day_offset: close_price}（offset=0 为决策日 00:00 UTC）。"""
+    return [
+        {"open_time": anchor_ms + off * _DAY_MS, "close_price": price}
+        for off, price in spec.items()
+    ]
+
+
+#: 标准价格路径：D-1 收 100（基准），D0 收 110，D6 收 130
+_STD_KLINES = _kline_rows({-10: 90, -2: 95, -1: 100, 0: 110, 3: 120, 6: 130, 10: 140})
+
+
+class TestPairSymbol:
+    def test_bare_symbol_gets_usdt(self):
+        assert binance_ds.pair_symbol("BTC") == "BTCUSDT"
+        assert binance_ds.pair_symbol("1000PEPE") == "1000PEPEUSDT"
+
+    def test_quote_suffixed_unchanged(self):
+        for q in binance_ds.QUOTES:
+            assert binance_ds.pair_symbol(f"BTC{q}") == f"BTC{q}"
+
+
+class TestTrailingReturn:
+    def test_basic(self):
+        """最新收盘 vs N 日前收盘（live 口径：含未收盘 bar）。"""
+        rows = _kline_rows({-3: 90, -2: 95, -1: 100, 0: 110})
+        assert binance_ds.trailing_return(rows, 1) == pytest.approx(10.0)
+        assert binance_ds.trailing_return(rows, 2) == pytest.approx(110 / 95 * 100 - 100)
+
+    def test_insufficient_window_none(self):
+        assert binance_ds.trailing_return(_kline_rows({0: 100}), 1) is None
+        assert binance_ds.trailing_return(None, 1) is None
+
+    def test_bad_close_none(self):
+        rows = [{"open_time": 1, "close_price": None}, {"open_time": 2, "close_price": 100}]
+        assert binance_ds.trailing_return(rows, 1) is None
+
+
+class TestClosedDailyReturns:
+    def test_basic_positioning_no_lookahead(self):
+        """base = 决策时最近已收盘日线（D-1），非决策日当根（无前视）。"""
+        out = binance_ds.closed_daily_returns(_STD_KLINES, _RUN_TS_MS)
+        assert out["base_price"] == 100
+        assert out["ret_1d"] == 10.0  # 110/100
+        assert out["ret_7d"] == 30.0  # 130/100
+
+    def test_insufficient_window_returns_none(self):
+        out = binance_ds.closed_daily_returns(
+            _kline_rows({-1: 100, 0: 110, 3: 120}), _RUN_TS_MS
+        )
+        assert out["ret_1d"] == 10.0
+        assert out["ret_7d"] is None  # D+6 无数据
+
+    def test_before_window_empty(self):
+        assert binance_ds.closed_daily_returns(_kline_rows({1: 110, 2: 120}), _RUN_TS_MS) == {}
+
+    def test_tolerates_disorder_and_bad_rows(self):
+        """乱序 + 坏行（缺字段）不干扰定位（mock 降序防御）。"""
+        rows = [
+            {"open_time": None, "close_price": 1},
+            *_STD_KLINES[::-1],  # 降序
+            {"open_time": 5, "close_price": None},
+        ]
+        out = binance_ds.closed_daily_returns(rows, _RUN_TS_MS)
+        assert out["base_price"] == 100
+        assert out["ret_7d"] == 30.0
+
+    def test_gap_day_is_none_not_adjacent(self):
+        """D+6 缺失 → ret_7d None（不误用相邻日 D+3）。"""
+        out = binance_ds.closed_daily_returns(
+            _kline_rows({-1: 100, 0: 110, 3: 120, 7: 140}), _RUN_TS_MS
+        )
+        assert out["ret_7d"] is None
+
+    def test_empty_inputs(self):
+        assert binance_ds.closed_daily_returns(None, _RUN_TS_MS) == {}
+        assert binance_ds.closed_daily_returns([], _RUN_TS_MS) == {}
+
+    def test_custom_days_keys(self):
+        out = binance_ds.closed_daily_returns(_STD_KLINES, _RUN_TS_MS, days=(7,))
+        assert set(out) == {"base_price", "ret_7d"}

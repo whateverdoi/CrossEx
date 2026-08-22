@@ -33,46 +33,6 @@ _STD_KLINES = _kline_rows(
 )
 
 
-# ── _returns（纯函数） ───────────────────────────────────
-
-
-class TestReturns:
-    def test_basic_positioning_no_lookahead(self):
-        """base = 决策时最近已收盘日线（D-1），非决策日当根（无前视）。"""
-        out = review._returns(_STD_KLINES, _RUN_TS_MS)
-        assert out["base_price"] == 100
-        assert out["ret_1d"] == 10.0  # 110/100
-        assert out["ret_7d"] == 30.0  # 130/100
-
-    def test_insufficient_window_returns_none(self):
-        out = review._returns(_kline_rows({-1: 100, 0: 110, 3: 120}), _RUN_TS_MS)
-        assert out["ret_1d"] == 10.0
-        assert out["ret_7d"] is None  # D+6 无数据
-
-    def test_before_window_empty(self):
-        assert review._returns(_kline_rows({1: 110, 2: 120}), _RUN_TS_MS) == {}
-
-    def test_tolerates_disorder_and_bad_rows(self):
-        """乱序 + 坏行（缺字段）不干扰定位（mock 降序防御）。"""
-        rows = [
-            {"open_time": None, "close_price": 1},
-            *_STD_KLINES[::-1],  # 降序
-            {"open_time": 5, "close_price": None},
-        ]
-        out = review._returns(rows, _RUN_TS_MS)
-        assert out["base_price"] == 100
-        assert out["ret_7d"] == 30.0
-
-    def test_gap_day_is_none_not_adjacent(self):
-        """D+6 缺失 → ret_7d None（不误用相邻日 D+3）。"""
-        out = review._returns(_kline_rows({-1: 100, 0: 110, 3: 120, 7: 140}), _RUN_TS_MS)
-        assert out["ret_7d"] is None
-
-    def test_empty_inputs(self):
-        assert review._returns(None, _RUN_TS_MS) == {}
-        assert review._returns([], _RUN_TS_MS) == {}
-
-
 # ── _hit / _calibrate（纯函数） ─────────────────────────
 
 

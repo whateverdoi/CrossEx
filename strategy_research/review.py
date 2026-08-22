@@ -21,22 +21,12 @@ from pathlib import Path
 
 from strategy_research.datasources import binance
 
-#: 计价后缀（与 nodes._QUOTES 同口径；独立定义避免拉起节点层重依赖）
-_QUOTES = ("USDT", "USDC", "BUSD", "FDUSD", "TUSD", "DAI")
-
 #: 回看窗口：run_ts + 7d ≤ now 才回看（保证 T+7d 已收盘）
 _REVIEW_HORIZON_DAYS = 7
-
-#: 日线毫秒（K 线收盘判定：open_time + 1d ≤ run_ts 视为已收盘）
-_DAY_MS = 86_400_000
 
 #: 置信度分箱边界（左闭右开；末箱 [0.75, 1.0] 含 1.0）
 _CONF_BINS = (0.25, 0.5, 0.75)
 
-
-def _pair(symbol: str) -> str:
-    """裸名补 USDT（与 collect_data 装配口径一致）。"""
-    return symbol if any(symbol.endswith(q) for q in _QUOTES) else f"{symbol}USDT"
 
 
 def _parse_ts(raw: object) -> datetime | None:
@@ -48,45 +38,6 @@ def _parse_ts(raw: object) -> datetime | None:
     except ValueError:
         return None
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-
-
-def _returns(klines: list[dict] | None, run_ts_ms: int) -> dict:
-    """基准价 + T+1d/T+7d 收益 %（klines 按 open_time 升序定位）。
-
-    base = 决策时最近已收盘日线的 close；ret_N = base 后第 N 根 close 相对
-    base 的涨跌幅。窗口不足或决策早于窗口 → 对应值 None。
-    """
-    rows = sorted(
-        (
-            k
-            for k in (klines or [])
-            if k.get("open_time") and k.get("close_price")
-        ),
-        key=lambda k: k["open_time"],
-    )
-    if not rows:
-        return {}
-    base_idx = -1
-    for i, k in enumerate(rows):
-        if k["open_time"] + _DAY_MS <= run_ts_ms:
-            base_idx = i
-        else:
-            break
-    if base_idx < 0:
-        return {}
-    base_open = rows[base_idx]["open_time"]
-    base = rows[base_idx]["close_price"]
-    by_time = {k["open_time"]: k["close_price"] for k in rows}
-    out: dict = {"base_price": base}
-    for days, key in ((1, "ret_1d"), (7, "ret_7d")):
-        # 按天数定位（索引偏移在缺日时会错位）；缺口 → None
-        close = by_time.get(base_open + days * _DAY_MS)
-        out[key] = (
-            round((close / base - 1.0) * 100.0, 2)
-            if close is not None and base
-            else None
-        )
-    return out
 
 
 def _hit(direction: str, ret: float | None) -> bool | None:
@@ -210,11 +161,11 @@ def review_past_decisions(
                     continue
                 symbol = row.get("symbol") or ""
                 klines = binance.fetch_klines(
-                    _pair(symbol), interval="1d", limit=400
+                    binance.pair_symbol(symbol), interval="1d", limit=400
                 )
                 if klines is None:
                     run_ok = False
-                rets = _returns(klines, run_ts_ms)
+                rets = binance.closed_daily_returns(klines, run_ts_ms)
                 run_records.append(
                     {
                         "symbol": symbol,

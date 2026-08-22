@@ -26,9 +26,6 @@ from strategy_research.schemas import (
 )
 from strategy_research.tools import CHALLENGE_TOOLS, FACTS_TOOLS
 
-#: 计价后缀（与 defillama._strip_quote 一致，用于裸名补全）
-_QUOTES = ("USDT", "USDC", "BUSD", "FDUSD", "TUSD", "DAI")
-
 #: ③⑤ react agent 递归上限（防工具循环失控，规格）
 AGENT_RECURSION_LIMIT = 8
 
@@ -46,10 +43,6 @@ def _dp(value: Any, source: str) -> dict:
     }
 
 
-def _exch_symbol(symbol: str) -> str:
-    """token → 交易所 symbol：裸名补 USDT；已带计价后缀原样。"""
-    return symbol if symbol.endswith(_QUOTES) else symbol + "USDT"
-
 
 def _find(rows: list[dict] | None, symbol: str) -> dict | None:
     """共享全量列表中按 symbol 取行。"""
@@ -60,16 +53,6 @@ def _find(rows: list[dict] | None, symbol: str) -> dict | None:
             return r
     return None
 
-
-def _ret(klines: list[dict] | None, days: int) -> float | None:
-    """日线收盘 → N 日收益率 %（close[-1] vs close[-1-days]）。"""
-    if not klines or len(klines) < days + 2:
-        return None
-    last = klines[-1].get("close_price")
-    prev = klines[-1 - days].get("close_price")
-    if last is None or prev in (None, 0):
-        return None
-    return (last / prev - 1.0) * 100.0
 
 
 def _latest(rows: list[dict] | None, key: str) -> float | None:
@@ -242,7 +225,7 @@ def _fund(symbol: str, shared: dict) -> dict:
 
 def _market(symbol: str, shared: dict) -> dict:
     """市场快照：现货 ticker + klines 窗口 + 衍生品（futures_error 独立）。"""
-    exch = _exch_symbol(symbol)
+    exch = binance.pair_symbol(symbol)
     mkt: dict[str, Any] = {"error": None, "futures_error": None, "incomplete": False}
     errors: list[str] = []
     ticker = _find(shared["tickers"], exch)
@@ -264,7 +247,7 @@ def _market(symbol: str, shared: dict) -> dict:
         (90, "change_90d"),
         (365, "change_1y"),
     ):
-        mkt[key] = _dp(_ret(klines, days), "binance")
+        mkt[key] = _dp(binance.trailing_return(klines, days), "binance")
     mkt["listing_days"] = _dp((shared["listing"] or {}).get(exch), "binance_futures")
 
     # 衍生品（并入 market 快照，futures_error 独立标记）
@@ -311,7 +294,7 @@ def _market(symbol: str, shared: dict) -> dict:
 
 def _microstructure(symbol: str, taker: list[dict] | None, price_ret_24h: float | None) -> dict:
     """微观结构装配：OI 变化 / 多空比 / taker 比（board PoC 阶段 None）。"""
-    exch = _exch_symbol(symbol)
+    exch = binance.pair_symbol(symbol)
     ms: dict[str, Any] = {"board": None, "error": None, "incomplete": False}
     # 96 个 1h 点（跨 95h）才能算 48h 变化（48 点仅 47h 跨度，48h 恒缺失）
     oi_hist = binance_futures.fetch_open_interest_hist(exch, "1h", 96)

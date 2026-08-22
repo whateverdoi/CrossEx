@@ -108,3 +108,77 @@ def fetch_klines(
         except (IndexError, KeyError, TypeError, ValueError):
             continue
     return rows
+
+
+# ── 日线收益（预测能力 02 票：单一口径，live 与评估各一、同处一个适配器）──
+
+
+#: 计价后缀（裸 symbol 补全为交易所对时使用；现货/合约同口径）
+QUOTES = ("USDT", "USDC", "BUSD", "FDUSD", "TUSD", "DAI")
+
+
+def pair_symbol(symbol: str) -> str:
+    """裸名补 USDT 计价对；已带计价后缀原样返回。"""
+    return symbol if symbol.endswith(QUOTES) else symbol + "USDT"
+
+
+def trailing_return(klines: list[dict] | None, days: int) -> float | None:
+    """实时尾窗收益：最新收盘 vs N 日前收盘（live 信号口径）。
+
+    含未收盘 bar（最新一根即当前形成中的日线，价格=现价）——信号层要的就是
+    "此刻 vs N 日前"；与 :func:`closed_daily_returns` 的评估口径（无前视）
+    语义不同，勿混用。窗口不足 / 非法值 → None（UNKNOWN 纪律）。
+    """
+    if not klines or len(klines) < days + 2:
+        return None
+    last = klines[-1].get("close_price")
+    prev = klines[-1 - days].get("close_price")
+    if last is None or prev in (None, 0):
+        return None
+    return (last / prev - 1.0) * 100.0
+
+
+_DAY_MS = 86_400_000
+
+
+def closed_daily_returns(
+    klines: list[dict] | None, run_ts_ms: int, days: tuple[int, ...] = (1, 7)
+) -> dict:
+    """无前视日线收益（评估口径）：基准价 + 各 N 日收益 %。
+
+    base = 决策时最近已收盘日线的 close（open_time + 1d ≤ run_ts 的最后一根），
+    无前视偏差；ret_N = base 后第 N 根 close 相对 base 的涨跌幅（按绝对日键
+    定位，缺口 → None，不误用相邻日）。窗口不足或决策早于窗口 → {}（调用方
+    按无收益处理）。与 :func:`trailing_return` 语义不同：评估用已收盘基准。
+    供决策回看回路（review）使用；klines 按 open_time 升序/降序均可（内部排序）。
+    """
+    rows = sorted(
+        (
+            k
+            for k in (klines or [])
+            if k.get("open_time") and k.get("close_price")
+        ),
+        key=lambda k: k["open_time"],
+    )
+    if not rows:
+        return {}
+    base_idx = -1
+    for i, k in enumerate(rows):
+        if k["open_time"] + _DAY_MS <= run_ts_ms:
+            base_idx = i
+        else:
+            break
+    if base_idx < 0:
+        return {}
+    base_open = rows[base_idx]["open_time"]
+    base = rows[base_idx]["close_price"]
+    by_time = {k["open_time"]: k["close_price"] for k in rows}
+    out: dict = {"base_price": base}
+    for days_n in days:
+        close = by_time.get(base_open + days_n * _DAY_MS)
+        out[f"ret_{days_n}d"] = (
+            round((close / base - 1.0) * 100.0, 2)
+            if close is not None and base
+            else None
+        )
+    return out
