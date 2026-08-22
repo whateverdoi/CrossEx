@@ -402,7 +402,7 @@ def test_overview_per_token_summary(monkeypatch, tmp_path):
 
 
 def test_llm_calls_mock_and_live(monkeypatch):
-    """成本统计：mock 汇总分类计数 + total；live 全 0（未启用计数）。"""
+    """成本统计：mock 汇总假模型计数 + total；live 汇总 callback 计数。"""
     monkeypatch.setattr(
         report, "_MOCK_CALL_COUNTS", {"facts": 6, "decide": 6, "challenge": 3, "rebuttals": 3}
     )
@@ -414,13 +414,27 @@ def test_llm_calls_mock_and_live(monkeypatch):
         "total": 18,
     }
     monkeypatch.setattr(report, "is_mock_mode", lambda: False)
+    monkeypatch.setattr(
+        report, "LIVE_CALL_COUNTS", {"facts": 2, "decide": 2, "challenge": 1, "rebuttals": 1}
+    )
     assert report._llm_calls() == {
-        "facts": 0,
-        "decide": 0,
-        "challenge": 0,
-        "rebuttals": 0,
-        "total": 0,
+        "facts": 2,
+        "decide": 2,
+        "challenge": 1,
+        "rebuttals": 1,
+        "total": 6,
     }
+
+
+def test_live_call_counter_accumulates() -> None:
+    """live 计数 handler：on_llm_start 按 key 累加（含重试语义由 langchain 触发）。"""
+    from strategy_research import env
+
+    env.LIVE_CALL_COUNTS["decide"] = 0
+    h = env.live_call_counter("decide")
+    h.on_llm_start({}, [])
+    h.on_llm_start({}, [])
+    assert env.LIVE_CALL_COUNTS["decide"] == 2
 
 
 def test_run_json_meta_llm_calls(monkeypatch, tmp_path):
@@ -486,6 +500,91 @@ def test_end_to_end_five_artifacts_consistent(monkeypatch, tmp_path):
         assert diff[s]["cur"]["decision"] == run["results"][i]["decision"]
     assert result["meta"]["report_path"]  # 节点 meta 带报告路径
     assert "## 信号变化（相对上一批）" in md
+
+
+_SNAP_SCANNER = {
+    "date": "2026-08-16",
+    "market": {
+        "BTC": {
+            "price": 0.009465,
+            "ret_24h": -10.3184,
+            "ret_7d": 132.2585,
+            "price_change_pct_24h": -8.668,
+            "quote_volume_24h": 202807691.0,
+            "funding_rate": 5e-05,
+            "taker_buy_ratio_24h": 0.4983,
+            "open_interest_value": 39484773.0,
+            "futures_premium_pct": 0.1501,
+            "listing_days": 324.0,
+            "onboard_date": "2025-09-26",
+            "boards": ["gain_1h", "loss_24h", "gain_7d"],
+        }
+    },
+    "microstructure": {
+        "BTC": {
+            "oi_change_24h": -0.5416,
+            "oi_change_48h": -27.8883,
+            "oi_value_change_24h": -10.0886,
+            "ls_ratio_all": 0.5172,
+            "ls_ratio_all_change_24h": -3.2186,
+            "ls_ratio_top_acc": 0.4286,
+            "ls_ratio_top_pos": 0.6445,
+            "taker_bs_ratio": 1.0105,
+            "funding_avg": 7.9e-05,
+            "funding_trend": "flat",
+        }
+    },
+}
+
+
+def test_overview_scanner_snapshot_sections(monkeypatch, tmp_path):
+    """验收：快照可用 → 逐币分析含市场数据/微观结构两小节，数值对齐用户表格。"""
+    monkeypatch.chdir(tmp_path)
+    state = _mk_state(["BTC"], [_row("BTC")])
+    state["scanner_snapshot"] = _SNAP_SCANNER
+    run_dir, _ = report.build_report(state, {})
+    md = (run_dir / "overview.md").read_text(encoding="utf-8")
+    assert "#### 市场数据快照" in md
+    assert "#### 市场微观结构快照" in md
+    assert "| 价格 | $0.009465 |" in md
+    assert "| 24h 涨跌 / 7d 涨跌 | -10.32% / 132.26%（交易所官方 24h 口径 -8.67%） |" in md
+    assert "| 24h 成交额 | $202,807,691 |" in md
+    assert "| 资金费率 | 0.0050% |" in md
+    assert "| 主动买入占比 (24h) | 49.83% |" in md
+    assert "| 持仓量名义价值 | $39,484,773 |" in md
+    assert "| 期现溢价 (mark/index − 1) | 0.150% |" in md
+    assert "| 上市天数 | 324.0 天（合约 2025-09-26 上线） |" in md
+    assert "| 所属榜单 (board) | gain_1h / loss_24h / gain_7d |" in md
+    assert "| OI 变化 24h / 48h | -0.54% / -27.89% |" in md
+    assert "| 全市场多空账户比 (24h 变化) | 0.52 (-3.22%) |" in md
+    assert "| 官方 taker 买卖比 | 1.01 |" in md
+    assert "| funding 近 7 天均值 | 0.0079%（年化 2.9%） |" in md
+    assert "| funding 趋势 (近 3 期 vs 前期) | flat |" in md
+    assert "增仓（新仓推动）vs 减仓（平仓/逼空）" in md  # 客观含义列
+    assert "（不可用——未找到 BinanceApi data/research CSV）" not in md
+
+
+def test_overview_scanner_snapshot_unavailable_placeholder(monkeypatch, tmp_path):
+    """验收：快照缺失 → 占位文本，报告仍生成（空节不报错）。"""
+    monkeypatch.chdir(tmp_path)
+    state = _mk_state(["BTC"], [_row("BTC")])
+    run_dir, _ = report.build_report(state, {})
+    md = (run_dir / "overview.md").read_text(encoding="utf-8")
+    assert "（不可用——未找到 BinanceApi data/research CSV）" in md
+    assert "#### 市场数据快照" not in md
+
+
+def test_artifacts_include_scanner_snapshots():
+    """验收：candidates 每币含 market_snapshot / microstructure_snapshot（缺失 {}）。"""
+    state = _mk_state(["BTC"], [_row("BTC")])
+    state["scanner_snapshot"] = _SNAP_SCANNER
+    a = report._build_artifacts(state)["BTC"]
+    assert a["market_snapshot"]["price"] == 0.009465
+    assert a["market_snapshot"]["boards"] == ["gain_1h", "loss_24h", "gain_7d"]
+    assert a["microstructure_snapshot"]["funding_trend"] == "flat"
+    a2 = report._build_artifacts(_mk_state(["BTC"], [_row("BTC")]))["BTC"]
+    assert a2["market_snapshot"] == {}
+    assert a2["microstructure_snapshot"] == {}
 
 
 if __name__ == "__main__":

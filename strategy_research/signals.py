@@ -12,11 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
-#: sentiment 解读规则锚点（与 DECIDE_PROMPT 一致，见规格 ②）
-_SENTIMENT_NOTE = (
-    "持仓指标原始直读；解读规则见 DECIDE_PROMPT（funding 高=拥挤反向，多空比高=偏多；"
-    "funding_pctile_90d 高分位=费率极端拥挤；oi_price_divergence 同向=趋势确认，背离=弱势）"
-)
+from strategy_research.context import SENTIMENT_NOTE
 
 
 def _v(snap: dict | None, key: str) -> Any:
@@ -166,5 +162,5 @@ def sentiment_raw(mkt: dict | None, ms: dict | None = None) -> dict:
             "oi_change_24h": _v(ms, "oi_change_24h"),
             "oi_price_divergence": _v(ms, "oi_price_divergence"),
         },
-        "note": _SENTIMENT_NOTE,
+        "note": SENTIMENT_NOTE,
     }

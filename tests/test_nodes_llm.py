@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from strategy_research import env, nodes, schemas
+from strategy_research import context, env, nodes, schemas
 from strategy_research.graph import build_graph
 from strategy_research.schemas import TokenAnalysis
 
@@ -134,7 +134,7 @@ def test_challenge_prescreen_short_takes_bull_facts():
         "facts": {"ETH": _MIXED_FACTS},
         "signals": {},
     }
-    summary = nodes._build_challenge_summary("ETH", state)
+    summary = context.build_challenge_summary("ETH", state)
     assert "bull 事实 A" in summary
     assert "bear 事实 B" not in summary
 
@@ -149,7 +149,7 @@ def test_challenge_prescreen_long_takes_bear_facts():
         "facts": {"BTC": _MIXED_FACTS},
         "signals": {},
     }
-    summary = nodes._build_challenge_summary("BTC", state)
+    summary = context.build_challenge_summary("BTC", state)
     assert "bear 事实 B" in summary
     assert "bull 事实 A" not in summary
 
@@ -256,3 +256,83 @@ def test_decide_exception_fallback_pass(monkeypatch):
     assert d["confidence"] == 0.0
     assert d["fallback"] == "json_mode"
     assert "LLM 分析失败" in d["error"]
+
+
+_SNAP_STATE = {
+    "date": "2026-08-16",
+    "market": {
+        "AKEUSDT": {
+            "price": 0.009465,
+            "ret_1h": 3.9425,
+            "ret_4h": 0.0952,
+            "ret_24h": -10.3184,
+            "ret_7d": 132.2585,
+            "price_change_pct_24h": -8.668,
+            "quote_volume_24h": 202807691.0,
+            "funding_rate": 5e-05,
+            "taker_buy_ratio_24h": 0.4983,
+            "open_interest_value": 39484773.0,
+            "futures_premium_pct": 0.1501,
+            "listing_days": 324.0,
+            "onboard_date": "2025-09-26",
+            "boards": ["gain_1h", "loss_24h", "gain_7d"],
+        }
+    },
+    "microstructure": {
+        "AKEUSDT": {
+            "oi_change_24h": -0.5416,
+            "oi_change_48h": -27.8883,
+            "oi_value_change_24h": -10.0886,
+            "ls_ratio_all": 0.5172,
+            "ls_ratio_all_change_24h": -3.2186,
+            "ls_ratio_top_acc": 0.4286,
+            "ls_ratio_top_pos": 0.6445,
+            "taker_bs_ratio": 1.0105,
+            "funding_avg": 7.9e-05,
+            "funding_trend": "flat",
+        }
+    },
+}
+
+
+@pytest.fixture(scope="module")
+def scanned_full_result():
+    """mock 全链一次（1 token + 快照注入）：collect_data 后 state 带 scanner_snapshot。"""
+    _reset_counts()
+    result = build_graph().invoke(
+        {"tokens": ["AKEUSDT"], "scanner_snapshot": _SNAP_STATE, "meta": {}}
+    )
+    return result
+
+
+def test_facts_summary_contains_scanner_section():
+    """验收：摘要含扫描器快照节，字段带 scan_ 前缀与口径标注（③④⑤⑥ 共用）。"""
+    state = {"tokens": ["AKEUSDT"], "signals": {}, "scanner_snapshot": _SNAP_STATE}
+    summary = "\n".join(context._facts_summary_lines("AKEUSDT", state))
+    assert "== 扫描器快照（BinanceApi）==" in summary
+    assert "scan_price: 0.009465" in summary
+    assert "scan_ret_1h: 3.94%" in summary
+    assert "scan_ret_24h: -10.32%" in summary
+    assert "scan_ret_24h_official: -8.67%" in summary
+    assert "scan_futures_premium_pct: 0.15%" in summary
+    assert "scan_onboard_date: 2025-09-26" in summary
+    assert "scan_boards: gain_1h、loss_24h、gain_7d" in summary
+    assert "scan_ls_ratio_all: 0.52" in summary
+    assert "scan_funding_avg_7d: 0.000079" in summary
+    assert "scan_funding_trend: flat" in summary
+
+
+def test_facts_summary_without_scanner_section():
+    """验收：快照缺失 → 摘要无扫描器节（仅确定性信号照常）。"""
+    state = {"tokens": ["BTC"], "signals": {}}
+    summary = "\n".join(context._facts_summary_lines("BTC", state))
+    assert "扫描器快照" not in summary
+
+
+def test_mock_full_chain_keeps_scanner_snapshot(scanned_full_result):
+    """验收：全链 state 透传 scanner_snapshot（③-⑥ 同源参考，⑧ 报告消费）。"""
+    result = scanned_full_result
+    snap = result["scanner_snapshot"]
+    assert snap["date"] == "2026-08-16"
+    assert snap["market"]["AKEUSDT"]["price"] == 0.009465
+    assert snap["microstructure"]["AKEUSDT"]["funding_trend"] == "flat"

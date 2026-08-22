@@ -9,9 +9,14 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from strategy_research import review as review_mod
-from strategy_research.env import _MOCK_CALL_COUNTS, is_mock_mode
+from strategy_research.env import (
+    _MOCK_CALL_COUNTS,
+    LIVE_CALL_COUNTS,
+    is_mock_mode,
+)
 
 
 def _write_json(path: Path, obj: dict) -> None:
@@ -26,13 +31,10 @@ def _run_dir() -> Path:
 
 
 def _llm_calls() -> dict:
-    """LLM 调用计数（成本统计）：mock 模式从假模型计数汇总；live 全 0（未启用计数）。"""
-    counts = dict(_MOCK_CALL_COUNTS) if is_mock_mode() else {
-        "facts": 0,
-        "decide": 0,
-        "challenge": 0,
-        "rebuttals": 0,
-    }
+    """LLM 调用计数（成本统计）：mock 从假模型计数；live 从 callback 计数汇总。"""
+    counts = (
+        dict(_MOCK_CALL_COUNTS) if is_mock_mode() else dict(LIVE_CALL_COUNTS)
+    )
     counts["total"] = sum(v for k, v in counts.items() if k != "total")
     return counts
 
@@ -136,6 +138,7 @@ def _build_artifacts(state: dict) -> dict:
         for f in state.get("facts", {}).get(symbol) or []:
             t = f.get("topic") or "unknown"
             catalysts[t] = catalysts.get(t, 0) + 1
+        snap = state.get("scanner_snapshot") or {}
         artifacts[symbol] = {
             "liquidity_tier": tier,
             "opportunity_level": level,
@@ -149,6 +152,10 @@ def _build_artifacts(state: dict) -> dict:
                 f"catalyst: {analysis.get('catalyst', '')}"
             )[:200],
             "catalysts": catalysts,
+            "market_snapshot": (snap.get("market") or {}).get(symbol) or {},
+            "microstructure_snapshot": (
+                (snap.get("microstructure") or {}).get(symbol) or {}
+            ),
         }
     return artifacts
 
@@ -373,6 +380,102 @@ def _artifacts_lines(artifacts: dict, tokens: list[str]) -> list[str]:
     return lines
 
 
+def _fmt_num(value: Any, decimals: int = 2) -> str:
+    """数值 → 指定小数位文本；非数值 → UNKNOWN。"""
+    if not isinstance(value, (int, float)):
+        return "UNKNOWN"
+    return f"{value:.{decimals}f}"
+
+
+def _fmt_pct(value: Any, decimals: int = 2) -> str:
+    """百分比数值（value 本身是 % 数值）→ decimals 位 + %；非数值 → UNKNOWN。"""
+    if not isinstance(value, (int, float)):
+        return "UNKNOWN"
+    return f"{value:.{decimals}f}%"
+
+
+def _fmt_usd(value: Any) -> str:
+    """美元金额千分位（整数金额不带小数）；非数值 → UNKNOWN。"""
+    if not isinstance(value, (int, float)):
+        return "UNKNOWN"
+    return f"${value:,.0f}"
+
+
+def _fmt_price(value: Any) -> str:
+    """价格：最多 6 位小数去尾零；非数值 → UNKNOWN。"""
+    if not isinstance(value, (int, float)):
+        return "UNKNOWN"
+    return f"{value:.6f}".rstrip("0").rstrip(".")
+
+
+def _market_snapshot_lines(snap: dict) -> list[str]:
+    """市场数据快照小节：指标 | 值 两列表（对齐 BinanceApi template.md §1）。"""
+    ret = f"{_fmt_pct(snap.get('ret_24h'))} / {_fmt_pct(snap.get('ret_7d'))}"
+    if isinstance(snap.get("price_change_pct_24h"), (int, float)):
+        ret += f"（交易所官方 24h 口径 {_fmt_pct(snap.get('price_change_pct_24h'))}）"
+    taker = snap.get("taker_buy_ratio_24h")
+    taker_pct = (
+        "UNKNOWN" if not isinstance(taker, (int, float)) else f"{taker * 100:.2f}%"
+    )
+    funding = snap.get("funding_rate")
+    funding_pct = (
+        "UNKNOWN" if not isinstance(funding, (int, float)) else f"{funding * 100:.4f}%"
+    )
+    days = snap.get("listing_days")
+    days_str = "UNKNOWN" if not isinstance(days, (int, float)) else f"{days:.1f} 天"
+    if isinstance(days, (int, float)) and snap.get("onboard_date"):
+        days_str += f"（合约 {snap['onboard_date']} 上线）"
+    boards = " / ".join(snap.get("boards") or []) or "—"
+    return [
+        "#### 市场数据快照",
+        "",
+        "| 指标 | 值 |",
+        "|---|---|",
+        f"| 价格 | ${_fmt_price(snap.get('price'))} |",
+        f"| 24h 涨跌 / 7d 涨跌 | {ret} |",
+        f"| 24h 成交额 | {_fmt_usd(snap.get('quote_volume_24h'))} |",
+        f"| 资金费率 | {funding_pct} |",
+        f"| 主动买入占比 (24h) | {taker_pct} |",
+        f"| 持仓量名义价值 | {_fmt_usd(snap.get('open_interest_value'))} |",
+        f"| 期现溢价 (mark/index − 1) | {_fmt_pct(snap.get('futures_premium_pct'), 3)} |",
+        f"| 上市天数 | {days_str} |",
+        f"| 所属榜单 (board) | {boards} |",
+        "",
+    ]
+
+
+def _microstructure_snapshot_lines(snap: dict) -> list[str]:
+    """市场微观结构快照小节：指标 | 值 | 客观含义 三列表（对齐 template.md §2）。
+
+    “客观含义”列为全币通用解读模板常量（BinanceApi docs/research/template.md），
+    不随币种数值变化；值侧为扫描器原始数据渲染。
+    """
+    oi = f"{_fmt_pct(snap.get('oi_change_24h'))} / {_fmt_pct(snap.get('oi_change_48h'))}"
+    ls = _fmt_num(snap.get("ls_ratio_all"))
+    if isinstance(snap.get("ls_ratio_all_change_24h"), (int, float)):
+        ls += f" ({_fmt_pct(snap.get('ls_ratio_all_change_24h'))})"
+    funding = snap.get("funding_avg")
+    if isinstance(funding, (int, float)):
+        funding_str = f"{funding * 100:.4f}%（年化 {funding * 365 * 100:.1f}%）"
+    else:
+        funding_str = "UNKNOWN"
+    return [
+        "#### 市场微观结构快照",
+        "",
+        "| 指标 | 值 | 客观含义 |",
+        "|---|---|---|",
+        f"| OI 变化 24h / 48h | {oi} | 增仓（新仓推动）vs 减仓（平仓/逼空） |",
+        f"| OI 名义价值变化 24h | {_fmt_pct(snap.get('oi_value_change_24h'))} | 剔除价格因素后的资金进出 |",
+        f"| 全市场多空账户比 (24h 变化) | {ls} | 散户拥挤度：>2 偏多头拥挤，<0.5 偏空头拥挤 |",
+        f"| 大户多空账户比 | {_fmt_num(snap.get('ls_ratio_top_acc'))} | 与全市场背离时为聪明钱信号 |",
+        f"| 大户多空持仓比 | {_fmt_num(snap.get('ls_ratio_top_pos'))} | 同上（按持仓量口径） |",
+        f"| 官方 taker 买卖比 | {_fmt_num(snap.get('taker_bs_ratio'))} | >1 主动买盘占优；与 OI 变化交叉验证资金性质 |",
+        f"| funding 近 7 天均值 | {funding_str} | 深负 = 空头拥挤，深正 = 多头拥挤 |",
+        f"| funding 趋势 (近 3 期 vs 前期) | {snap.get('funding_trend') or 'UNKNOWN'} | 拥挤度变化方向 |",
+        "",
+    ]
+
+
 def _per_token_lines(state: dict, artifacts: dict) -> list[str]:
     """逐币分析节：决策/direction/level/关键事实/挑战与反驳（缺失渲染空节）。"""
     results = state.get("results") or []
@@ -388,6 +491,18 @@ def _per_token_lines(state: dict, artifacts: dict) -> list[str]:
             f"置信度 {row.get('confidence', 0.0)}，"
             f"level {a.get('opportunity_level', 'D')}）"
         )
+        # 扫描器快照小节（state 中由 collect_data 读入；缺失 → 占位，空节不报错）
+        snap = state.get("scanner_snapshot") or {}
+        m_snap = (snap.get("market") or {}).get(s) or {}
+        mic_snap = (snap.get("microstructure") or {}).get(s) or {}
+        if m_snap:
+            lines += _market_snapshot_lines(m_snap)
+        if mic_snap:
+            lines += _microstructure_snapshot_lines(mic_snap)
+        if not m_snap and not mic_snap:
+            lines.append(
+                "- 扫描器快照：（不可用——未找到 BinanceApi data/research CSV）"
+            )
         if row.get("downgraded"):
             lines.append(f"- 风控降级：{'；'.join(row['downgraded'])}")
         facts = (state.get("facts") or {}).get(s) or []

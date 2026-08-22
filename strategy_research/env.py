@@ -6,9 +6,10 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from dotenv import load_dotenv
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
@@ -90,6 +91,22 @@ def get_llm(
 
 #: 假模型调用计数（按 prompt 特征分类；验收"PASS 透传零调用"可验证）
 _MOCK_CALL_COUNTS = {"facts": 0, "decide": 0, "challenge": 0, "rebuttals": 0}
+LIVE_CALL_COUNTS = {"facts": 0, "decide": 0, "challenge": 0, "rebuttals": 0}
+
+
+class _LiveCallCounter(BaseCallbackHandler):
+    """live 模式 LLM 调用计数：on_llm_start 触发（含 with_retry 重试，重试也算实际调用）。"""
+
+    def __init__(self, key: str) -> None:
+        self._key = key
+
+    def on_llm_start(self, *args: Any, **kwargs: Any) -> None:
+        LIVE_CALL_COUNTS[self._key] += 1
+
+
+def live_call_counter(key: str) -> BaseCallbackHandler:
+    """按调用点取计数 handler（key ∈ facts/decide/challenge/rebuttals）。"""
+    return _LiveCallCounter(key)
 
 #: mock 决策映射（确定性 fixtures，与 datasources/mock.py 固定候选同性质；
 #: 其余 symbol → PASS，保证 PASS 透传路径可测）

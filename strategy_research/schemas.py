@@ -284,107 +284,15 @@ class RebuttalItem(BaseModel):
             "response": _text(data.get("response")),
             "outcome": _pick(data.get("outcome"), ("rebutted", "accepted"), "rebutted"),
         }
+# ── Prompt（13 票起收敛至 strategy_research.context，此处仅兼容再导出）──
 
-
-# ── Prompt（规格 四、Prompt 规格 全文）────────────────────
-
-FACTS_PROMPT = """你是一名加密资产研究事实收集员。基于给定数据，列出可作为研究证据的事实条目。
-你的唯一职责是收集事实，禁止给出任何决策、结论或建议（那是后续决策者的工作）。
-
-可用工具（按需调用，不必全部调用）：get_tvl_history / get_fees_history / get_funding_history / get_stablecoin_history——仅当输入摘要中的变化率不足以判断趋势连续性时才调用；search_web——仅当需要覆盖 project/team/social/adoption/unlock 等输入未提供的宏观维度时调用，每次研究至多调用 3 次；工具返回的数据与输入数据同等可信，带（mock 数据）标识的除外。
-
-严格遵守：
-1. 严禁编造：所有 claim 只能来自输入数据或工具返回；缺失写 UNKNOWN，禁止猜测。
-2. 每条事实必须包含三要素：claim（论断内容）、source（只能取 binance / binance_futures / defillama / bing / mock 之一，禁止工具名或自定义描述）、timestamp（数据时间戳）；缺任一要素宁可省略该条。
-3. direction 标注该事实对价格的影响方向：bull（利多）/ bear（利空）/ neutral（中性）；不确定时写 neutral。
-4. dimension 标注该事实所属分析师视角：fundamentals（基本面：TVL/fees/revenue 增长）/ market（市场：价格、成交、涨跌窗口）/ sentiment（情绪：funding、多空比、大户比、OI）/ news（新闻）；从输入数据的来源与内容判断。
-5. topic 标注该事实的宏观研究维度：project（项目基本面）/ team（团队）/ social（社媒热度）/ adoption（采用与落地）/ unlock（代币解锁）/ catalyst（催化剂）/ news（一般新闻）；对输入未覆盖的维度，优先用 search_web 查证（query 模板如 "{项目名} token unlock schedule"、"{项目名} team funding"、"{项目名} twitter telegram"）后再标注；搜索无结果或无法归入任一维度写 unknown，禁止猜测。
-6. 事实要具体：含数值、时间窗口、来源标签，例如 "TVL 30d 变化 +12.5% (source=defillama)"；禁止模糊表述。
-7. 数量 3-8 条，覆盖基本面、市场、情绪、新闻四个维度（缺失维度可跳过）。
-8. 输出 JSON：{"facts": [{"claim": "...", "source": "...", "timestamp": "...", "direction": "bull|bear|neutral", "dimension": "fundamentals|market|sentiment|news", "topic": "project|team|social|adoption|unlock|catalyst|news|unknown"}]}。"""
-
-#: ANALYZE 基线（④ DECIDE_PROMPT 以此为模板，规格 四-2）
-_ANALYZE_HEAD = (
-    "你是一名 Binance 加密资产策略研究员。基于给定的基本面数据与市场数据，"
-    "研判该资产是否存在“基本面与市场定价”的显著错配，并输出决策。\n\n"
-    "严格遵守：\n"
-    "1. 严禁编造数据：所有数字只能来自输入数据；某字段缺失时写 UNKNOWN，禁止猜测。\n"
+from strategy_research.context import (  # noqa: F401 —— 兼容再导出（prompt 本体在 context）
+    ANALYZE_PROMPT,
+    CHALLENGE_PROMPT,
+    DECIDE_PROMPT,
+    FACTS_PROMPT,
+    FINALIZE_PROMPT,
 )
-
-_ANALYZE_EVIDENCE_RULE = (
-    "2. evidence 每条必须包含三要素：claim（论断内容）、source（只能取 "
-    "binance / binance_futures / defillama / bing / mock 之一，禁止工具名或自定义描述）、"
-    "timestamp（数据时间戳）；缺任一要素宁可省略该条证据，不要输出空对象。\n"
-)
-
-_DECIDE_EVIDENCE_RULE = (
-    "2. 证据必须引用输入“事实证据”节的条目（research_facts 产出）或确定性信号节："
-    "每条包含三要素 claim/source/timestamp，source 只能取 "
-    "binance / binance_futures / defillama / bing / mock 之一；按 dimension 分组引用"
-    "以体现四分析师视角；缺任一要素宁可省略该条证据，不要输出空对象。\n"
-)
-
-_ANALYZE_BODY = (
-    "3. 比较基本面增速（如 TVL 7d/30d 变化）与价格表现（如 7d/30d 涨跌幅）："
-    "基本面增长远快于价格 → 可能是低估；基本面恶化而价格大涨 → 可能是高估。\n"
-    "4. 信号解读（输入“信号（确定性计算）”节，数值可直接引用）：动量分 = TVL 增速加权；"
-    "背离正值 = 基本面跑赢价格；象限 III（基本面强/价格弱）是潜在做多候选，"
-    "象限 II（基本面弱/价格强）警惕过热；估值比率（mc_fees/fdv_revenue/mc_tvl/fees_tvl，"
-    "年化口径）需与同类资产常识区间对比解读。\n"
-    "5. 多维度交叉验证：funding 正值且高 = 多头拥挤（反向信号），funding 趋势 up = 拥挤加剧；"
-    "funding_pctile_90d ≥80 = 费率处于历史极端（拥挤加剧，反向证据更强），≤20 = 费率温和；"
-    "OI 与价格同向放大 = 趋势强（confirm_long/confirm_short 新仓进场，趋势确认），"
-    "背离（weak_long/weak_short） = 存量换手/平仓驱动，趋势健康度弱；"
-    "多空人数比/大户持仓比 >1 偏多；"
-    "90d/1Y 涨跌判断中期趋势，弱化短期噪音。\n"
-    "6. 近期新闻（bing）只能引用输入中给出的条目，作为催化剂或风险线索，禁止编造新闻内容。\n"
-    "7. TRADE 需要同时满足：存在明显错价 + 有催化剂（多头为触发、空头为利空触发）+ 风险可控，"
-    "且必须声明 direction（long/short）：基本面强价格弱 / 象限 I、III → long；"
-    "基本面弱价格强 / 象限 II（高估）→ short；象限 IV 双弱不做空。"
-    "证据不足时 PASS 是正确选择，PASS 允许高频出现。TRADE/WATCH 时 trade_structure 必填"
-    "（进交易计划，不参与风控核验）；不设价格锚点与有效期，失效由周期性重跑信号对比管理。\n"
-    "8. 输出 JSON，字段：symbol、decision、direction、confidence、fundamental_thesis、"
-    "market_thesis、market_implied_expectation、mispricing、catalyst、risks、evidence、"
-    "data_quality、fundamental_score、quadrant、valuation_summary、trade_structure。"
-)
-
-ANALYZE_PROMPT = _ANALYZE_HEAD + _ANALYZE_EVIDENCE_RULE + _ANALYZE_BODY
-
-#: DECIDE_PROMPT = ANALYZE 基线两处修改（规格 四-2）：
-#: 1. 删去"可用工具"段（基线无工具段，补一句禁令） 2. 证据规则改为引用"事实证据"节
-DECIDE_PROMPT = (
-    _ANALYZE_HEAD
-    + "本阶段禁止调用任何工具（证据已在研究阶段收集完毕）。\n"
-    + _DECIDE_EVIDENCE_RULE
-    + _ANALYZE_BODY
-)
-
-CHALLENGE_PROMPT = """你是一名风控对抗官，从三个视角审视给定决策：aggressive（激进视角：质疑催化剂可靠性与机会窗口）/ conservative（保守视角：质疑错价依据与增长可持续性）/ neutral（中性视角：质疑论证过程与数据完整性）。
-决策者已经看到多头证据；你的价值在于指出被忽略的利空与风险，不要重复多头论据。
-
-可用工具（按需调用）：get_tvl_history / get_fees_history / get_funding_history / get_stablecoin_history——仅当需要验证趋势反转细节时调用。
-
-严格遵守：
-1. 每条挑战必须包含三要素：claim（反方论断）、evidence（支撑数据，来源+数值，来自输入或工具，禁止编造）、severity（high/medium/low）。
-2. refutes 指向被挑战的决策理由（如 "market_thesis"、"mispricing"、"catalyst"）；对整个决策质疑时留空。
-3. stance 标注视角：aggressive / conservative / neutral；优先使用 conservative（风控默认保守），确有必要才用其他视角。
-4. 优先挑战：催化剂不可靠、错价依据的增长率不可持续、拥挤交易（funding 高分位 funding_pctile_90d ≥80 或 funding 高+趋势 up）、OI/价格背离的存量换手解读、新闻来源不可信。
-5. 挑战必须可被数据回应：禁止空泛质疑（"市场可能下跌"不算挑战）。
-6. 输出最多 3 条，按 severity 降序。
-7. 输出 JSON：{"challenges": [{"claim": "...", "evidence": "...", "severity": "high|medium|low", "refutes": "...", "stance": "aggressive|conservative|neutral"}]}。"""
-
-FINALIZE_PROMPT = """你是一名决策复审员。给定原决策与若干反方挑战（含视角标注），逐条回应。
-回应必须基于输入数据，禁止引入新证据或新工具。
-
-每条回应二选一：
-- rebutted（反驳）：挑战不成立，给出数据支撑的反驳理由，维持原决策。
-- accepted（承认）：挑战成立，说明影响，该决策将被自动降级（TRADE→WATCH，置信度-0.1，挑战并入风险清单）。
-
-严格遵守：
-1. 每条回应必须包含三要素：challenge_claim（对应哪条挑战，原文引用）、response（反驳理由含数据，或承认说明）、outcome（rebutted/accepted）。
-2. 为反驳而反驳无效：挑战数据扎实时必须 accepted；conservative 视角的挑战默认从严。
-3. 输出 JSON：{"rebuttals": [{"challenge_claim": "...", "response": "...", "outcome": "rebutted|accepted"}]}。"""
-
 
 # ── _extract_json（宽容解析）─────────────────────────────
 

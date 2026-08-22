@@ -10,6 +10,8 @@ from __future__ import annotations
 import time
 from datetime import datetime, timezone
 
+from strategy_research.context import SENTIMENT_NOTE
+
 #: mock 固定候选（规格 ⑨ 伪代码：6 个，裸 symbol 名）
 MOCK_TOKENS = ["BTC", "ETH", "SOL", "UNI", "DOGE", "XRP"]
 
@@ -377,12 +379,6 @@ def mock_web_rss(query: str) -> list[dict]:
     ]
 
 
-#: sentiment 解读规则（与 signals.sentiment_raw 的 note 同构）
-_SENTIMENT_NOTE = (
-    "持仓指标原始直读；解读规则见 DECIDE_PROMPT（funding 高=拥挤反向，多空比高=偏多；"
-    "funding_pctile_90d 高分位=费率极端拥挤；oi_price_divergence 同向=趋势确认，背离=弱势）"
-)
-
 
 #: mock 持仓指标原始值中与序列无关的固定部分（序列派生值见 _mock_funding_trend）
 _MOCK_SENTIMENT_FIXED = {
@@ -541,7 +537,7 @@ def mock_signals_data(symbol: str, kind: str | None = None) -> dict:
                 "funding_pctile_90d": _funding_pctile_90d(symbol),
                 "oi_price_divergence": _oi_price_divergence(symbol),
             },
-            "note": _SENTIMENT_NOTE,
+            "note": SENTIMENT_NOTE,
         },
         "error": None,
     }

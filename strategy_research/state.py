@@ -19,6 +19,9 @@ class State(TypedDict, total=False):
     microstructure_data: dict[str, dict]
     web_data: dict[str, dict]
 
+    # 扫描器快照（① collect_data 读外部 BinanceApi CSV，③-⑥ 摘要参考 + ⑧ 报告渲染）
+    scanner_snapshot: dict
+
     # 确定性信号（② compute_signals 写入）
     signals: dict[str, dict]
 
