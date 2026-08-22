@@ -13,6 +13,7 @@ from typing import Any
 from langchain.agents import create_agent
 
 from strategy_research import context, env
+from strategy_research import review as review_mod
 from strategy_research import scanner_snapshot as scan_mod
 from strategy_research import signals as sig_mod
 from strategy_research.datasources import binance, binance_futures, defillama, mock
@@ -469,6 +470,15 @@ def collect_data(state: dict) -> dict:
             scanner_snapshot = scan_mod.load_snapshots()
         except Exception as exc:  # 同 report_error 纪律：仅记录不中断批
             meta["scan_error"] = f"扫描器快照读取失败: {exc}"
+    # 校准基线（13 票）：live 模式加载历史已回看记录 → ③-⑥ 摘要携带；
+    # mock 模式跳过（mock 决策不进评估池，隔离保持一致）；失败仅记录不中断批
+    if not env.is_mock_mode():
+        try:
+            meta["calibration_context"] = review_mod.render_calibration_context(
+                review_mod.load_records()
+            )
+        except Exception as exc:
+            meta["calibration_error"] = f"校准基线加载失败: {exc}"
     shared = _load_shared(tokens)
     market_data: dict[str, dict] = {}
     fundamental_data: dict[str, dict] = {}

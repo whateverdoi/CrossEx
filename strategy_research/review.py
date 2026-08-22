@@ -1,8 +1,10 @@
-"""决策追踪与校准（12 票）：回看历史决策的事后表现。
+"""决策追踪与校准（12 票 + 13 票闭合回路）：回看历史决策的事后表现。
 
 评估回路：每批运行扫描 ``reports/`` 历史 run.json，对到期（run_ts + 7d ≤ now）
 的带方向决策（TRADE/WATCH）用日线 klines 计算相对基准价的 T+1d/T+7d 收益，
-输出方向命中率与置信度分箱校准，供 overview「决策复盘」节与后续 prompt 锚定。
+输出方向命中率与置信度分箱校准，供 overview「决策复盘」节（12 票）与
+prompt 校准基线（13 票：:func:`render_calibration_context` 渲染，① 加载进 meta，
+③-⑥ 摘要携带）消费。
 
 纪律（与全架构一致）：
 - 纯确定性计算，零 LLM 调用；klines 失败 → 该条 UNAVAILABLE，不中断批
@@ -47,7 +49,7 @@ def _hit(direction: str, ret: float | None) -> bool | None:
     return ret > 0 if direction == "long" else ret < 0
 
 
-def _calibrate(records: list[dict]) -> dict:
+def calibrate(records: list[dict]) -> dict:
     """命中率 + 置信度四分箱 + TRADE/WATCH 分组（ret_7d 判定）。
 
     UNAVAILABLE（ret_7d 缺失）不计入任何统计。
@@ -196,5 +198,39 @@ def review_past_decisions(
         "new_records": new_records,
         "unavailable_records": unavailable,
         "records": state["records"],
-        "stats": _calibrate(state["records"]),
+        "stats": calibrate(state["records"]),
     }
+
+
+def load_records(reports_root: str | Path = Path("reports")) -> list[dict]:
+    """读已回看记录（review_log.json 的 records），容错归零。
+
+    供 ① collect_data 加载校准基线（本批决策尚未入池，统计到上一批为止）；
+    不扫描新 run、不拉 klines——那部分仍由 :func:`review_past_decisions` 在 ⑧ 做。
+    """
+    return _load_review_log(Path(reports_root))["records"]
+
+
+def render_calibration_context(records: list[dict]) -> str:
+    """校准基线文本（prompt 用）：累积命中率 + TRADE/WATCH 分组 + 置信度分箱。
+
+    空池（无已回看记录）→ 空串（摘要不渲染该节，mock 模式同理）；
+    纯确定性计算，零 LLM 调用；与 ⑧ 报告「决策复盘」节同源（同一 :func:`calibrate`）。
+    """
+    stats = calibrate(records)
+    n = stats.get("n") or 0
+    if n == 0:
+        return ""
+    lines = [
+        f"累积方向判断 {n} 条（T+7d），命中率 {stats.get('hit_rate')}；"
+        "置信度分箱："
+        + "、".join(
+            f"{b['range']} → {b['hit_rate']}（n={b['n']}）"
+            for b in stats.get("by_confidence") or []
+        )
+    ]
+    for dec in ("TRADE", "WATCH"):
+        s = (stats.get("by_decision") or {}).get(dec)
+        if s:
+            lines.append(f"{dec}：{s['n']} 条，命中率 {s['hit_rate']}")
+    return "\n".join(lines)

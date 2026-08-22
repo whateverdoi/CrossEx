@@ -340,3 +340,37 @@ def test_real_unknown_kind_fundamental(monkeypatch: pytest.MonkeyPatch) -> None:
     assert fund["tvl"]["value"] is None
     assert fund["incomplete"] is True
     assert "ZZZ" in res["meta"]["incomplete_tokens"]
+
+
+# ── 校准基线加载（13 票：① 注入 meta，③-⑥ 摘要消费） ──
+
+
+def test_mock_mode_skips_calibration_context() -> None:
+    """mock 模式不注入（mock 决策不进评估池，隔离保持一致）。"""
+    res = nodes.collect_data({"tokens": ["BTC"]})
+    assert "calibration_context" not in res["meta"]
+
+
+def test_live_mode_loads_calibration_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    """live 模式：历史记录渲染为校准基线注入 meta（确定性、零 LLM）。"""
+    monkeypatch.setenv("SR_MOCK", "0")
+    _patch_fetches(monkeypatch)
+    monkeypatch.setattr(
+        nodes.review_mod,
+        "load_records",
+        lambda *a, **k: [{"hit_7d": True, "decision": "TRADE", "confidence": 0.8}],
+    )
+    res = nodes.collect_data({"tokens": ["BTC"]})
+    assert "命中率" in res["meta"]["calibration_context"]
+
+
+def test_live_mode_calibration_failure_isolated(monkeypatch: pytest.MonkeyPatch) -> None:
+    """校准加载失败仅记 calibration_error，不中断批。"""
+    monkeypatch.setenv("SR_MOCK", "0")
+    _patch_fetches(monkeypatch)
+    monkeypatch.setattr(
+        nodes.review_mod, "load_records", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+    )
+    res = nodes.collect_data({"tokens": ["BTC"]})
+    assert "calibration_context" not in res["meta"]
+    assert "calibration_error" in res["meta"]

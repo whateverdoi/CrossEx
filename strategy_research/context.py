@@ -307,6 +307,18 @@ def _facts_summary_lines(symbol: str, state: dict) -> list[str]:
     return lines
 
 
+def _calibration_lines(state: dict) -> list[str]:
+    """校准基线节（13 票）：meta.calibration_context 由 review 渲染注入。
+
+    无校准（首跑 / mock 模式 / 加载失败）→ 空列表（摘要不渲染该节）。
+    仅④⑥ 摘要携带（决策与复审消费自己的历史命中率）；③ 采证摘要不带（只提取证据）。
+    """
+    cal = (state.get("meta") or {}).get("calibration_context")
+    if not cal:
+        return []
+    return ["", "== 校准基线（历史决策复盘，T+7d 方向命中）==", cal]
+
+
 def build_facts_summary(symbol: str, state: dict) -> str:
     """③ 事实摘要：骨架 + 指令行（只提取证据，禁止结论）。"""
     return "\n".join(
@@ -338,6 +350,7 @@ def build_decide_summary(symbol: str, state: dict) -> str:
                 break
         if not shown:
             lines.append("仅依据确定性信号")
+    lines += _calibration_lines(state)
     return "\n".join(lines)
 
 
@@ -407,6 +420,7 @@ def build_challenge_summary(symbol: str, state: dict) -> str:
         )
     lines += ["", "== 信号（确定性计算）=="]
     lines += _signal_lines(symbol, state)
+    lines += _calibration_lines(state)
     return "\n".join(lines)
 
 
@@ -423,4 +437,5 @@ def build_finalize_summary(symbol: str, state: dict) -> str:
         lines.append(f"  证据: {c.get('evidence')}")
     lines += ["", "== 信号（确定性计算）=="]
     lines += _signal_lines(symbol, state)
+    lines += _calibration_lines(state)
     return "\n".join(lines)

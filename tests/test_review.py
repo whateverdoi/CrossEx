@@ -52,7 +52,7 @@ class TestHitAndCalibrate:
             {"hit_7d": None, "confidence": 0.9, "decision": "TRADE"},  # UNAVAILABLE
             {"hit_7d": True, "confidence": 1.0, "decision": "TRADE"},
         ]
-        stats = review._calibrate(records)
+        stats = review.calibrate(records)
         assert stats["n"] == 4  # UNAVAILABLE 不计入
         assert stats["hit_rate"] == 0.75
         bins = {b["range"]: b for b in stats["by_confidence"]}
@@ -64,7 +64,7 @@ class TestHitAndCalibrate:
         assert stats["by_decision"]["WATCH"] == {"n": 2, "hit_rate": 0.5}
 
     def test_calibrate_empty(self):
-        stats = review._calibrate([])
+        stats = review.calibrate([])
         assert stats["n"] == 0
         assert stats["hit_rate"] is None
         assert all(b["n"] == 0 for b in stats["by_confidence"])
@@ -349,3 +349,38 @@ def test_build_report_review_exception_recorded_not_fatal(
     assert "decision_review" not in run  # 失败不写节点
     md = (run_dir / "overview.md").read_text(encoding="utf-8")
     assert "## 决策复盘" in md  # 空节占位，报告仍生成
+
+
+# ── 校准基线渲染（13 票：prompt 侧消费同一 calibrate seam） ──
+
+
+class TestCalibrationContext:
+    def _records(self) -> list[dict]:
+        return [
+            {"hit_7d": True, "decision": "TRADE", "confidence": 0.8},
+            {"hit_7d": False, "decision": "WATCH", "confidence": 0.4},
+            {"hit_7d": None, "decision": "TRADE", "confidence": 0.6},  # 不计入
+            {"hit_7d": True, "decision": "TRADE", "confidence": 0.9},
+        ]
+
+    def test_empty_pool_renders_empty(self):
+        assert review.render_calibration_context([]) == ""
+
+    def test_render_contains_stats(self):
+        text = review.render_calibration_context(self._records())
+        assert "累积方向判断 3 条" in text  # n=3（UNAVAILABLE 不计）
+        assert "命中率" in text
+        assert "TRADE：2 条" in text
+        assert "WATCH：1 条" in text
+        assert "置信度分箱" in text
+
+    def test_load_records_tolerant(self, tmp_path):
+        assert review.load_records(tmp_path) == []
+        (tmp_path / "review_log.json").write_text(
+            '{"reviewed": ["x"], "records": [{"hit_7d": true}]}', encoding="utf-8"
+        )
+        assert review.load_records(tmp_path) == [{"hit_7d": True}]
+
+    def test_load_records_corrupt_falls_back_empty(self, tmp_path):
+        (tmp_path / "review_log.json").write_text("not json", encoding="utf-8")
+        assert review.load_records(tmp_path) == []

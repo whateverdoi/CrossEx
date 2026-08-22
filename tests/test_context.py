@@ -184,3 +184,30 @@ class TestSchemasReexport:
         assert "策略研究员" in context.DECIDE_PROMPT
         assert "对抗官" in context.CHALLENGE_PROMPT
         assert "复审员" in context.FINALIZE_PROMPT
+
+
+class TestCalibrationSection:
+    """13 票：校准基线节注入（仅④⑥ 摘要携带，③ 不带）。"""
+
+    def _with_cal(self):
+        state = _state_with()
+        state["meta"] = {"calibration_context": "累积方向判断 3 条（T+7d），命中率 0.667"}
+        return state
+
+    def test_decide_summary_carries_section(self):
+        summary = context.build_decide_summary("BTC", self._with_cal())
+        assert "== 校准基线（历史决策复盘，T+7d 方向命中）==" in summary
+        assert "累积方向判断 3 条" in summary
+
+    def test_finalize_summary_carries_section(self):
+        summary = context.build_finalize_summary("BTC", self._with_cal())
+        assert "== 校准基线（历史决策复盘，T+7d 方向命中）==" in summary
+
+    def test_facts_summary_does_not_carry(self):
+        """③ 采证只提取证据，不携带校准基线。"""
+        summary = context.build_facts_summary("BTC", self._with_cal())
+        assert "校准基线" not in summary
+
+    def test_no_calibration_no_section(self):
+        summary = context.build_decide_summary("BTC", _state_with())
+        assert "校准基线" not in summary
