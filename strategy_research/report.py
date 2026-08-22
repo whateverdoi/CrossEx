@@ -13,7 +13,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from strategy_research import review as review_mod
 from strategy_research.env import (
     _MOCK_CALL_COUNTS,
     LIVE_CALL_COUNTS,
@@ -56,14 +55,6 @@ def build_report(state: dict, meta: dict) -> tuple[Path, dict]:
     run_ts = datetime.now(timezone.utc).isoformat()
     meta["llm_calls"] = _llm_calls()
 
-    # 12 票：决策追踪与校准（独立 try：失败仅记 review_error，不拖累报告；
-    # 此时当前 run.json 尚未落盘，不会被自己扫到）
-    decision_review: dict = {}
-    try:
-        decision_review = review_mod.review_past_decisions()
-    except Exception as exc:  # 同 report_error 纪律：仅记录不中断批
-        meta["review_error"] = f"决策复盘失败: {exc}"
-
     run = {
         "meta": {
             "mode": mode,
@@ -76,10 +67,8 @@ def build_report(state: dict, meta: dict) -> tuple[Path, dict]:
         "evidence": state.get("evidence") or {},
         "rejected_evidence": state.get("rejected_evidence") or {},
         "data_snapshot": _build_data_snapshot(state),
-        "signals": {s: _signal_state(s, state) for s in state["tokens"]},
+        "signals": {s: _signal_snapshot(s, state) for s in state["tokens"]},
     }
-    if decision_review:
-        run["decision_review"] = decision_review
     _write_json(run_dir / "run.json", run)
 
     # 04 票：candidates 工件 + 信号快照/对比（独立 try：失败仅记 report_error）
@@ -120,7 +109,7 @@ _SIGNAL_KEYS = ("momentum", "quadrant", "funding_pctile_90d", "oi_price_divergen
 _TREND_KEYS = ("tvl_trend_30d", "fees_trend_30d", "stablecoin_change_30d")
 
 
-def _signal_state(symbol: str, state: dict) -> dict:
+def _signal_snapshot(symbol: str, state: dict) -> dict:
     """确定性信号快照（04 票）：quadrant/momentum/funding_pctile_90d/
     oi_price_divergence + 趋势特征（spec D8）。
 
@@ -175,7 +164,7 @@ def _build_snapshot(state: dict, run_ts: str, mode: str) -> dict:
         "run_ts": run_ts,
         "mode": mode,
         "tokens": state["tokens"],
-        "signals": {s: _signal_state(s, state) for s in state["tokens"]},
+        "signals": {s: _signal_snapshot(s, state) for s in state["tokens"]},
     }
 
 

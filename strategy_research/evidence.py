@@ -4,11 +4,11 @@
   basis（domain/field/value 三元组）+ source，**无 confidence 字段**
   （LLM 自评信心分是主观臆想，不进入证据体系，D3 决策）。
 - ``verify_evidence``：确定性核验纯函数（终审）——basis 逐级解引用存在且
-  值一致 → 通过；否则剔除并留痕（claim + reason），取代旧 risk_check 的
-  机器强制位置（D8 决策）。
+  值一致 → 通过；否则剔除并留痕（claim + reason），证据体系的机器强制位置
+  （D8 决策；05 票：旧终审路径已退役）。
 
-宽容纪律与 schemas.py 同构：LLM 输出是弱契约，model_validator 归一清洗，
-非法值置默认，model_validate 永不抛异常（坏条目丢弃在节点装配层做）。
+宽容纪律：LLM 输出是弱契约，model_validator 归一清洗，非法值置默认，
+model_validate 永不抛异常（坏条目丢弃在节点装配层做）。
 """
 
 from __future__ import annotations

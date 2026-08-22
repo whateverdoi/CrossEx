@@ -2,7 +2,7 @@
 
 mock 模式 get_llm 返回确定性假模型（env._MockChatModel），LLM 调用计数走
 env._MOCK_CALL_COUNTS（03 票：键为 bull/bear），全链两分支各 6 次可验证。
-旧决策链（research_facts/decide/challenge/finalize）测试随节点退役（05 票清理）。
+05 票：旧决策链节点测试随节点退役，本文件仅存分支证据链测试。
 """
 
 from __future__ import annotations
@@ -154,7 +154,7 @@ def test_facts_summary_scanner_section():
 
 
 def test_mock_full_chain_keeps_scanner_snapshot(scanned_full_result):
-    """验收：全链 state 透传 scanner_snapshot（③-⑥ 同源参考，⑧ 报告消费）。"""
+    """验收：全链 state 透传 scanner_snapshot（分支摘要同源参考，⑧ 报告消费）。"""
     result = scanned_full_result
     snap = result["scanner_snapshot"]
     assert snap["date"] == "2026-08-16"

@@ -1,8 +1,7 @@
 """01/03 票 RED：图结构 + SR_MOCK=1 端到端跑通（03 票切换证据分支拓扑）。
 
 新拓扑：collect_data → compute_signals → [bull_research ‖ bear_research 并行]
-→ evidence_verify → write_report；旧决策链（research_facts/decide/challenge/
-finalize/risk_check）从图移除（函数保留死代码，05 票清理）。
+→ evidence_verify → write_report；05 票：旧决策链节点已退役，图仅 6 节点。
 """
 
 from __future__ import annotations

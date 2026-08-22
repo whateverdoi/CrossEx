@@ -379,28 +379,3 @@ def test_trend_features_failure_unknown(monkeypatch: pytest.MonkeyPatch) -> None
     assert fund["tvl"]["value"] is not None  # 主数据不受影响
     assert fund["incomplete"] is False  # 趋势特征缺失不置 incomplete
     assert res["fundamental_data"]["BTC"]["stablecoin_change_30d"]["value"] == 0.0
-
-
-# ── 校准基线加载（13 票：① 注入 meta，③-⑥ 摘要消费） ──
-
-
-def test_calibration_context_modes(monkeypatch: pytest.MonkeyPatch) -> None:
-    """校准基线：mock 不注入（mock 决策不进评估池）；live 注入历史渲染；
-    加载失败仅记 calibration_error，不中断批。"""
-    assert "calibration_context" not in nodes.collect_data({"tokens": ["BTC"]})["meta"]
-
-    monkeypatch.setenv("SR_MOCK", "0")
-    _patch_fetches(monkeypatch)
-    monkeypatch.setattr(
-        nodes.review_mod,
-        "load_records",
-        lambda *a, **k: [{"hit_7d": True, "decision": "TRADE", "confidence": 0.8}],
-    )
-    assert "命中率" in nodes.collect_data({"tokens": ["BTC"]})["meta"]["calibration_context"]
-
-    monkeypatch.setattr(
-        nodes.review_mod, "load_records", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
-    )
-    res = nodes.collect_data({"tokens": ["BTC"]})
-    assert "calibration_context" not in res["meta"]
-    assert "calibration_error" in res["meta"]

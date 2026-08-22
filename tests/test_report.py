@@ -17,31 +17,13 @@ import pytest
 from strategy_research import report
 
 
-def _row(
-    symbol: str,
-    decision: str = "WATCH",
-    direction: str = "long",
-    confidence: float = 0.5,
-    **extra,
-) -> dict:
-    return {
-        "symbol": symbol,
-        "decision": decision,
-        "direction": direction,
-        "confidence": confidence,
-        **extra,
-    }
-
-
-def _mk_state(tokens, results=None, facts=None, volumes=None) -> dict:
+def _mk_state(tokens, volumes=None) -> dict:
     """构造 report 消费的最小 state（market_data 只含 quote_volume_24h）。"""
     market_data = {}
     for s in tokens:
         market_data[s] = {"quote_volume_24h": {"value": (volumes or {}).get(s)}}
     return {
         "tokens": tokens,
-        "results": results or [],
-        "facts": facts or {},
         "market_data": market_data,
     }
 
@@ -105,7 +87,7 @@ def test_artifacts_failure_records_report_error(monkeypatch, tmp_path):
 
     monkeypatch.setattr(report, "_build_artifacts", _boom)
     meta: dict = {}
-    run_dir, artifacts = report.build_report(_mk_state(["BTC"], []), meta)
+    run_dir, artifacts = report.build_report(_mk_state(["BTC"]), meta)
     assert "report_error" in meta
     assert "工件/快照落盘失败" in meta["report_error"]
     assert (run_dir / "run.json").is_file()
@@ -139,7 +121,7 @@ def test_run_json_meta_llm_calls(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(report, "_MOCK_CALL_COUNTS", {"bull": 2, "bear": 1})
     meta: dict = {}
-    run_dir, _ = report.build_report(_mk_state(["BTC"], [_row("BTC")]), meta)
+    run_dir, _ = report.build_report(_mk_state(["BTC"]), meta)
     run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
     assert run["meta"]["llm_calls"]["total"] == 3
     assert meta["llm_calls"]["total"] == 3
@@ -165,7 +147,7 @@ _ALL_SIGNAL_KEYS = [
 
 def _evidence_state() -> dict:
     """证据体系 state：evidence（bull/bear_case）+ rejected_evidence + 信号数据。"""
-    state = _mk_state(["BTC", "ETH"], [])
+    state = _mk_state(["BTC", "ETH"])
     state["evidence"] = {
         "BTC": {
             "bull_case": [
@@ -276,7 +258,7 @@ def test_evidence_md_sections():
 
 def test_evidence_md_empty_state():
     """空态：无证据/无剔除 → 占位不报错，报告仍生成。"""
-    md = _render_evidence(_mk_state(["BTC"], []))
+    md = _render_evidence(_mk_state(["BTC"]))
     assert "| BTC | 0 | 0 | — |" in md
     assert "（无做多证据）" in md
     assert "（无做空证据）" in md
@@ -327,7 +309,7 @@ def test_signal_diff_actions():
 
 def test_candidates_simplified():
     """验收：candidates.json 仅候选列表（机会分级/流动性分层退役，spec D8）。"""
-    a = report._build_artifacts(_mk_state(["BTC", "ETH"], []))
+    a = report._build_artifacts(_mk_state(["BTC", "ETH"]))
     assert a == {"candidates": ["BTC", "ETH"]}
 
 

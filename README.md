@@ -93,15 +93,15 @@ screener（图外入口，确定性筛选）
    ↓ tokens
 ① collect_data      确定性：行情/估值/微观结构快照（含 funding 分位、OI 价格背离）
 ② compute_signals   确定性：估值/动量/背离 + sentiment 拥挤度纯函数
-③ research_facts    多分析师：六维事实收集（TVL/费率/稳定币/搜索等）
-④ decide            LLM 结构化决策（方向 + 置信度 + 交易结构）
-⑤ challenge         对抗者：逐项挑战，LLM 反驳
-⑥ finalize          整合裁决（TRADE / PASS / WAIT）
-⑦ risk_check        确定性风控：EV 边界 + 组合集中度（只降不升）
-⑧ write_report      工件落盘
+bull_research       多头证据研究员（json_mode 单次调用，≤8 条证据）
+bear_research       空头证据研究员（json_mode 单次调用，≤8 条证据）
+③ evidence_verify   确定性核验：basis 逐级解引用，剔除留痕
+④ write_report      工件落盘
 ```
 
-决策失效机制：**无价格锚点、无有效期**——由周期性重跑 + 跨运行信号快照对比实现（重跑时 `stop_long`/`stop_short` 即信号反转失效）。
+两分支并行执行（fan-out/fan-in），同消费同一份冻结快照、互不可见——同一数据可被两分支引用为相反证据，分歧点并列呈现。系统不产出任何方向性结论，由使用者依据证据自行裁决。
+
+信号失效机制：**无价格锚点、无有效期**——由周期性重跑 + 跨运行信号快照对比实现（信号反转时 `action` 由 `unchanged` 变 `changed`）。
 
 ## 输出工件
 
@@ -109,24 +109,24 @@ screener（图外入口，确定性筛选）
 
 | 文件 | 内容 |
 | --- | --- |
-| `overview.md` | 人类可读报告（决策 + 依据 + 信号变化 + 币种筛选节） |
-| `run.json` | 运行元数据（模式/规则/LLM 成本）+ 全部决策明细 |
-| `candidates.json` | 候选币种及筛选指标 |
-| `snapshot.json` | 决策快照（symbol/direction/confidence），下次运行前先读旧值 |
-| `signal_diff.json` | 与上次运行的信号对比（new/hold/stop_short/stop_long） |
+| `evidence.md` | 证据陈列文档（总览表 + 每 token 做多/做空证据表 + 剔除记录附录） |
+| `run.json` | 运行元数据（模式/规则/LLM 成本）+ 证据清单 + 数据快照投影 + 信号快照 |
+| `candidates.json` | 候选币种列表（仅候选，分级退役） |
+| `snapshot.json` | 信号快照（quadrant/momentum/funding_pctile_90d/oi_price_divergence/趋势特征） |
+| `signal_diff.json` | 与上次运行的信号对比（action ∈ new/changed/unchanged） |
 
 ## 目录结构
 
 ```
 strategy_research/
 ├── main.py             # CLI 入口：tokens 解析 → 建图 → invoke
-├── graph.py            # 8 节点装配 + 编译冒烟
-├── nodes.py            # 各节点实现（数据装配/信号/风控）
+├── graph.py            # 6 节点装配 + 编译冒烟
+├── nodes.py            # 各节点实现（数据装配/信号/分支/核验/报告）
 ├── signals.py          # 确定性信号纯函数（无 IO，缺失 → None）
 ├── screener.py         # 币种筛选规则引擎（Filter AND → Rank Top N）
-├── schemas.py          # LLM 结构化输出 schema + 4 份 prompt
-├── tools.py            # react agent 工具注册表（facts / challenge）
-├── review.py           # 风控核验（EV 边界 + 组合集中度）
+├── schemas.py          # 宽容 JSON 解析器（_extract_json 系列）
+├── evidence.py         # 证据体系（EvidenceItem + 确定性核验）
+├── context.py          # 分支 prompt + 摘要构建器 + 情绪解读注记
 ├── report.py           # 报告落盘与工件生成
 ├── state.py            # LangGraph state 定义
 ├── env.py              # LLM 装配（DeepSeek / mock）

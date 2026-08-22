@@ -1,7 +1,8 @@
-"""图节点：8 个节点，线性装配；条件全在节点内部；批处理永不中断。
+"""图节点：6 节点证据分支拓扑（03 票接线，05 票清理旧决策链）。
 
-01 票骨架：占位实现——mock 模式最小可用（写空结构 + 后写覆盖），
-完整逻辑由后续票实现（①=04 / ②=05 / ③-⑥=07 / ⑦=08 / ⑧=09-10）。
+① collect_data（确定性数据收集）→ ② compute_signals（确定性信号）→
+[bull_research ‖ bear_research]（LLM 证据分支，并行）→ evidence_verify
+（确定性核验）→ ④ write_report（报告落盘）。批处理永不中断。
 """
 
 from __future__ import annotations
@@ -10,28 +11,14 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from langchain.agents import create_agent
-
 from strategy_research import context, env
 from strategy_research import evidence as ev_mod
-from strategy_research import review as review_mod
 from strategy_research import scanner_snapshot as scan_mod
 from strategy_research import signals as sig_mod
 from strategy_research.datasources import binance, binance_futures, defillama, mock
 from strategy_research.datasources import web as web_ds
 from strategy_research.evidence import EvidenceItem
-from strategy_research.schemas import (
-    ChallengeItem,
-    FactItem,
-    RebuttalItem,
-    TokenAnalysis,
-    _extract_json,
-)
-from strategy_research.tools import CHALLENGE_TOOLS, FACTS_TOOLS
-
-#: ③⑤ react agent 递归上限（防工具循环失控，规格）
-AGENT_RECURSION_LIMIT = 8
-
+from strategy_research.schemas import _extract_json
 
 # ── ① collect_data：共享资源 + per-token 装配 ───────────────
 
@@ -377,7 +364,7 @@ def _web(symbol: str) -> dict:
 def _error_snapshots(
     symbol: str, exc: Exception | None
 ) -> tuple[dict, dict, dict, dict]:
-    """异常兜底快照：全字段四元组 None，结构契约不被破坏（②⑦ 直读安全）。"""
+    """异常兜底快照：全字段四元组 None，结构契约不被破坏（②③ 直读安全）。"""
     msg = f"装配异常: {exc}" if exc else "装配异常"
     fund: dict[str, Any] = {
         "kind": "unknown",
@@ -486,7 +473,7 @@ def collect_data(state: dict) -> dict:
     order.append("collect_data")
     meta["node_order"] = order
     tokens = state["tokens"]
-    # 扫描器快照（外部 BinanceApi CSV，只读；异常/缺失 → {}，③-⑥ 摘要与⑧ 报告占位；
+    # 扫描器快照（外部 BinanceApi CSV，只读；异常/缺失 → {}，分支摘要与④ 报告占位；
     # 已注入的 state 快照优先，测试注入/外部提供不经文件读取）
     scanner_snapshot: dict = dict(state.get("scanner_snapshot") or {})
     if not scanner_snapshot:
@@ -494,15 +481,6 @@ def collect_data(state: dict) -> dict:
             scanner_snapshot = scan_mod.load_snapshots()
         except Exception as exc:  # 同 report_error 纪律：仅记录不中断批
             meta["scan_error"] = f"扫描器快照读取失败: {exc}"
-    # 校准基线（13 票）：live 模式加载历史已回看记录 → ③-⑥ 摘要携带；
-    # mock 模式跳过（mock 决策不进评估池，隔离保持一致）；失败仅记录不中断批
-    if not env.is_mock_mode():
-        try:
-            meta["calibration_context"] = review_mod.render_calibration_context(
-                review_mod.load_records()
-            )
-        except Exception as exc:
-            meta["calibration_error"] = f"校准基线加载失败: {exc}"
     shared = _load_shared(tokens)
     market_data: dict[str, dict] = {}
     fundamental_data: dict[str, dict] = {}
@@ -570,47 +548,6 @@ def compute_signals(state: dict) -> dict:
     return {"signals": signals_out, "meta": meta}
 
 
-def _collect_facts(symbol: str, state: dict) -> list[dict]:
-    """③ 单 token 采证：react agent + 宽容解析；坏条目丢弃；异常 → []。"""
-    items: list[dict] = []
-    try:
-        summary = context.build_facts_summary(symbol, state)
-        agent = create_agent(env.get_llm(), FACTS_TOOLS, system_prompt=context.FACTS_PROMPT)
-        result = agent.invoke(
-            {"messages": [("human", summary)]},
-            config={
-                "recursion_limit": AGENT_RECURSION_LIMIT,
-                "callbacks": [env.live_call_counter("facts")],
-            },
-        )
-        obj = _extract_json(result["messages"][-1].content)
-        for x in (obj or {}).get("facts") or []:
-            try:
-                item = FactItem.model_validate(x).model_dump()
-                if item["claim"] and item["source"]:
-                    items.append(item)
-            except Exception:  # noqa: S112 —— 坏条目丢弃（规格 ③-4）
-                continue
-    except Exception:  # noqa: S110 —— 异常 → facts=[]，④ 只见确定性信号（规格 ③ 失败矩阵）
-        pass
-    return items
-
-
-def research_facts(state: dict) -> dict:
-    """③ 采证（LLM）：四分析师视角 facts（07 票）。
-
-    每 token 串行：react agent（FACTS_TOOLS 5 工具）采证 → 宽容解析 →
-    坏条目丢弃；单 token 异常 → facts=[]（④ 只见确定性信号）；批不中断。
-    """
-    meta, order = _meta(state)
-    order.append("research_facts")
-    meta["node_order"] = order
-    return {
-        "facts": {s: _collect_facts(s, state) for s in state["tokens"]},
-        "meta": meta,
-    }
-
-
 def _invoke_branch(symbol: str, state: dict, side: str) -> tuple[list[dict], str | None]:
     """分支单 token 证据提取（02 票）：json_mode 单次调用 + 宽容解析。
 
@@ -642,7 +579,7 @@ def _invoke_branch(symbol: str, state: dict, side: str) -> tuple[list[dict], str
         return [], f"分支异常: {exc}"
 
 
-def _branch(state: dict, side: str, key: str) -> dict:
+def _branch(state: dict, side: str) -> dict:
     """分支节点模板（bull/bear 共用，02 票）：每 token 独立证据提取，批不中断。
 
     只写本分支独占字段（{side}_evidence / {side}_errors）——两分支并行时
@@ -663,27 +600,21 @@ def _branch(state: dict, side: str, key: str) -> dict:
 
 
 def bull_research(state: dict) -> dict:
-    """多头证据研究员（02 票）：单 token 结构化证据（≤8 条）。
-
-    不接线——旧图照常，03 票拓扑切换后生效。
-    """
-    return _branch(state, "bull", "bull_research")
+    """多头证据研究员（02 票）：单 token 结构化证据（≤8 条）。"""
+    return _branch(state, "bull")
 
 
 def bear_research(state: dict) -> dict:
-    """空头证据研究员（02 票）：单 token 结构化证据（≤8 条）。
-
-    不接线——旧图照常，03 票拓扑切换后生效。
-    """
-    return _branch(state, "bear", "bear_research")
+    """空头证据研究员（02 票）：单 token 结构化证据（≤8 条）。"""
+    return _branch(state, "bear")
 
 
 def evidence_verify(state: dict) -> dict:
     """证据核验（03 票，确定性）：两分支产出合并核验 → evidence + rejected_evidence。
 
     纯函数无 IO（evidence.verify_evidence）：basis 逐级解引用存在且值一致 →
-    通过；否则剔除留痕。取代旧 risk_check 的机器强制位置（spec D8）。
-    串行节点补记分支 node_order（并行分支不写共享 meta，顺序即图定义顺序）。
+    通过；否则剔除留痕。串行节点补记分支 node_order（并行分支不写共享 meta，
+    顺序即图定义顺序）。
     """
     meta, order = _meta(state)
     order += ["bull_research", "bear_research", "evidence_verify"]
@@ -694,242 +625,8 @@ def evidence_verify(state: dict) -> dict:
     return {"evidence": verified, "rejected_evidence": rejected, "meta": meta}
 
 
-def _invoke_analysis(symbol: str, state: dict) -> dict:
-    """④ 单 token 决策：json_mode 单次调用 + _extract_json 宽容解析。
-
-    异常/不可解析 → PASS 兜底（保守原则，fallback 记录可审计）。
-    """
-    try:
-        summary = context.build_decide_summary(symbol, state)
-        out = (
-            env.get_llm(json_mode=True)
-            .with_retry(stop_after_attempt=2)
-            .invoke(
-                [("system", context.DECIDE_PROMPT), ("human", summary)],
-                config={"callbacks": [env.live_call_counter("decide")]},
-            )
-        )
-        obj = _extract_json(getattr(out, "content", out))
-        if not isinstance(obj, dict):
-            raise TypeError("json_mode 输出不可解析")
-        return TokenAnalysis.model_validate(obj).model_dump()
-    except Exception as exc:
-        return {
-            "symbol": symbol,
-            "decision": "PASS",
-            "confidence": 0.0,
-            "error": f"LLM 分析失败: {exc}",
-            "fallback": "json_mode",
-        }
-
-
-def decide(state: dict) -> dict:
-    """④ 决策（LLM）：json_mode 单次调用，禁止 tools（07 票）。
-
-    摘要 = 确定性骨架 + 事实证据节（按 dimension 分组）；异常 → PASS 兜底，
-    fallback 记录；批不中断。
-    """
-    meta, order = _meta(state)
-    order.append("decide")
-    meta["node_order"] = order
-    return {
-        "decisions": {s: _invoke_analysis(s, state) for s in state["tokens"]},
-        "meta": meta,
-    }
-
-
-def _invoke_challenge(symbol: str, state: dict) -> list[dict]:
-    """⑤ 单 token 对抗：PASS 透传零调用；非 PASS react agent，截断 ≤3 条。"""
-    dec = (state.get("decisions") or {}).get(symbol) or {}
-    if dec.get("decision") == "PASS":
-        return []
-    items: list[dict] = []
-    try:
-        summary = context.build_challenge_summary(symbol, state)
-        agent = create_agent(
-            env.get_llm(), CHALLENGE_TOOLS, system_prompt=context.CHALLENGE_PROMPT
-        )
-        result = agent.invoke(
-            {"messages": [("human", summary)]},
-            config={
-                "recursion_limit": AGENT_RECURSION_LIMIT,
-                "callbacks": [env.live_call_counter("challenge")],
-            },
-        )
-        obj = _extract_json(result["messages"][-1].content)
-        for x in (obj or {}).get("challenges") or []:
-            try:
-                items.append(ChallengeItem.model_validate(x).model_dump())
-            except Exception:  # noqa: S112 —— 单条丢弃（规格 ⑤ 失败矩阵）
-                continue
-    except Exception:  # noqa: S110 —— 异常 → 空列表，⑥ 维持（规格 ⑤ 失败矩阵）
-        pass
-    return items[:3]
-
-
-def challenge(state: dict) -> dict:
-    """⑤ 对抗（LLM）：PASS 透传零调用，非 PASS 挖反方（07 票）。
-
-    反方事实预筛按决策方向取反（多头取 bear / 空头取 bull）；
-    单 token 异常 → 空列表（⑥ 维持）；批不中断。
-    """
-    meta, order = _meta(state)
-    order.append("challenge")
-    meta["node_order"] = order
-    return {
-        "challenges": {s: _invoke_challenge(s, state) for s in state["tokens"]},
-        "meta": meta,
-    }
-
-
-def _invoke_rebuttals(symbol: str, state: dict) -> dict:
-    """⑥ 单 token 复审：无挑战透传；逐条 rebutted/accepted，accepted 只降不升。"""
-    dec = (state.get("decisions") or {}).get(symbol) or {}
-    chs = (state.get("challenges") or {}).get(symbol) or []
-    if not chs:
-        return {"analysis": dec, "rebuttals": []}
-    try:
-        summary = context.build_finalize_summary(symbol, state)
-        out = (
-            env.get_llm(json_mode=True)
-            .with_retry(stop_after_attempt=2)
-            .invoke(
-                [("system", context.FINALIZE_PROMPT), ("human", summary)],
-                config={"callbacks": [env.live_call_counter("rebuttals")]},
-            )
-        )
-        obj = _extract_json(getattr(out, "content", out))
-        rebuttals: list[dict] = []
-        for x in (obj or {}).get("rebuttals") or []:
-            try:
-                rebuttals.append(RebuttalItem.model_validate(x).model_dump())
-            except Exception:  # noqa: S112 —— 单条丢弃（规格 ⑥ 失败矩阵）
-                continue
-        analysis = dict(dec)
-        for rb in rebuttals:
-            if rb["outcome"] == "accepted":
-                analysis["decision"] = "WATCH"  # 只降不升
-                analysis["confidence"] = round(
-                    max(0.0, float(analysis.get("confidence", 0.0)) - 0.1), 2
-                )
-                analysis["risks"] = list(analysis.get("risks") or []) + [rb["response"]]
-        return {"analysis": analysis, "rebuttals": rebuttals}
-    except Exception:
-        return {"analysis": dec, "rebuttals": []}
-
-
-def finalize(state: dict) -> dict:
-    """⑥ 复审（LLM）：逐条 rebutted/accepted，accepted 只降不升（07 票）。
-
-    无挑战透传零调用；单 token 异常 → 维持原决策；批不中断。
-    """
-    meta, order = _meta(state)
-    order.append("finalize")
-    meta["node_order"] = order
-    return {
-        "final_decisions": {s: _invoke_rebuttals(s, state) for s in state["tokens"]},
-        "meta": meta,
-    }
-
-
-def _ev_flags(symbol: str, analysis: dict, state: dict) -> list[str]:
-    """EV 边界核验（Conservative Analyst 视角）：TRADE 方向须与确定性信号一致。
-
-    多头：momentum.value >= 0 或 quadrant ∈ {I, III}；空头：momentum.value < 0 或
-    quadrant == II（IV 双弱无错价依据，不做空）；方向缺失即不满足。
-    signals[symbol] 缺失 → 跳过核验（规格失败矩阵：缺数据不等于矛盾，不误伤）。
-    """
-    side = analysis.get("direction")
-    sig = (state.get("signals") or {}).get(symbol) or {}
-    # 键缺失或信号层失败（05 票 error 条目）→ 跳过核验：缺数据不等于矛盾，不误伤
-    if not sig or sig.get("error"):
-        return []
-    mom = (sig.get("momentum") or {}).get("value")
-    quad = ((sig.get("divergence") or {}).get("value") or {}).get("quadrant")
-    if side == "long":
-        ok = (isinstance(mom, (int, float)) and mom >= 0) or quad in ("I", "III")
-    elif side == "short":
-        ok = (isinstance(mom, (int, float)) and mom < 0) or quad == "II"
-    else:
-        ok = False
-    if ok:
-        return []
-    side_text = {"long": "多头", "short": "空头"}.get(side, "未声明方向")
-    return [f"EV 不足: 动量/背离信号与{side_text}决策矛盾"]
-
-
-def _signal_state(symbol: str, state: dict) -> dict:
-    """确定性信号状态快照（04 票：随结果落盘，供回看按信号分桶）。
-
-    任一缺失 → None（UNKNOWN 纪律）；signals 层失败（error 条目）→ 全 None。
-    """
-    sig = (state.get("signals") or {}).get(symbol) or {}
-    none_all = {
-        "momentum": None,
-        "quadrant": None,
-        "funding_pctile_90d": None,
-        "oi_price_divergence": None,
-    }
-    if not sig or sig.get("error"):
-        return none_all
-    mom = (sig.get("momentum") or {}).get("value")
-    quad = ((sig.get("divergence") or {}).get("value") or {}).get("quadrant")
-    mkt = (state.get("market_data") or {}).get(symbol) or {}
-    ms = (state.get("microstructure_data") or {}).get(symbol) or {}
-    pct = (mkt.get("funding_pctile_90d") or {}).get("value")
-    od = (ms.get("oi_price_divergence") or {}).get("value") or {}
-    return {
-        "momentum": mom if isinstance(mom, (int, float)) else None,
-        "quadrant": quad if quad in ("I", "II", "III", "IV") else None,
-        "funding_pctile_90d": pct if isinstance(pct, (int, float)) else None,
-        "oi_price_divergence": od.get("label") if isinstance(od, dict) else None,
-    }
-
-
-def risk_check(state: dict) -> dict:
-    """⑦ 风控终审（确定性）：EV 边界 + 组合集中度两条核验，只降不升（08 票）。
-
-    纯函数无 IO，LLM 无法覆盖降级。两遍扫描：先统计批内 TRADE 数，再逐 token
-    核验；有 flag 的 TRADE 降级 WATCH + downgraded 落分析对象（下游 results/报告
-    消费）。signals 缺失的 token 跳过 EV 核验（不误伤）；批处理永不中断。
-    """
-    meta, order = _meta(state)
-    order.append("risk_check")
-    meta["node_order"] = order
-    tokens = state["tokens"]
-    finals = state.get("final_decisions", {})
-    trade_count = sum(
-        1
-        for s in tokens
-        if ((finals.get(s) or {}).get("analysis") or {}).get("decision") == "TRADE"
-    )
-    risk_flags: dict[str, list[str]] = {}
-    results: list[dict] = []
-    for symbol in tokens:
-        item = finals.get(symbol) or {}
-        analysis = dict(item.get("analysis") or {})
-        flags: list[str] = []
-        if analysis.get("decision") == "TRADE":
-            flags = _ev_flags(symbol, analysis, state)
-            if trade_count > 2:
-                flags.append(f"组合集中度超限: 批内 TRADE 数 = {trade_count}")
-            if flags:  # 终审降级（Portfolio Manager 裁决权）：只降不升
-                analysis["decision"] = "WATCH"
-                analysis["downgraded"] = flags
-        risk_flags[symbol] = flags
-        results.append(
-            {
-                **analysis,
-                "rebuttals": item.get("rebuttals") or [],
-                "risk_flags": flags,
-                "signal_state": _signal_state(symbol, state),
-            }
-        )
-    return {"risk_flags": risk_flags, "results": results, "meta": meta}
-
-
 def write_report(state: dict) -> dict:
-    """⑧ 报告落盘：evidence.md + run.json + candidates.json + snapshot/diff（04 票）。"""
+    """④ 报告落盘：evidence.md + run.json + candidates.json + snapshot/diff（04 票）。"""
     from strategy_research.report import build_report
 
     meta, order = _meta(state)
@@ -938,7 +635,7 @@ def write_report(state: dict) -> dict:
     try:
         report_path, artifacts = build_report(state, meta)
         meta["report_path"] = str(report_path)
-    except Exception as exc:  # 规格：落盘异常仅记 meta，不中断批（六节错误矩阵 ⑧）
+    except Exception as exc:  # 规格：落盘异常仅记 meta，不中断批（六节错误矩阵 ④）
         artifacts = {s: {} for s in state["tokens"]}
         meta["report_error"] = f"报告落盘失败: {exc}"
     return {

@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import json
 import os
-import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -57,8 +55,8 @@ def get_llm(
     加载）、api_base 自动读 ``DEEPSEEK_API_BASE``（默认官方端点）、model 默认
     deepseek-chat（规格技术栈基线）可被 ``DEEPSEEK_MODEL`` 覆盖。
 
-    json_mode=True 装配 ``response_format=json_object``（④⑥ 决策/复审单次调用）；
-    ③⑤ react agent 用默认 False——json_object 会约束模型只输出 JSON，干扰工具
+    json_mode=True 装配 ``response_format=json_object``（分支证据单次调用）；
+    react agent 用默认 False——json_object 会约束模型只输出 JSON，干扰工具
     调用循环。
 
     ``SR_MOCK=1`` 返回确定性假模型（LLM 层 mock，与数据源层 mock 同构）：
@@ -89,8 +87,7 @@ def get_llm(
 
 # ── LLM 层 mock（07 票：SR_MOCK=1 全离线确定性假模型）──────────────────
 
-#: 假模型调用计数（按 prompt 特征分类；03 票：计数键改为 bull/bear，
-#: 旧决策链键退役——旧节点死代码不再计数，05 票清理）
+#: 假模型调用计数（按 prompt 特征分类；03 票：计数键改为 bull/bear）
 _MOCK_CALL_COUNTS = {"bull": 0, "bear": 0}
 LIVE_CALL_COUNTS = {"bull": 0, "bear": 0}
 
@@ -117,42 +114,6 @@ def reset_call_counts() -> None:
         _MOCK_CALL_COUNTS[key] = 0
         LIVE_CALL_COUNTS[key] = 0
 
-#: mock 决策映射（确定性 fixtures，与 datasources/mock.py 固定候选同性质；
-#: 其余 symbol → PASS，保证 PASS 透传路径可测）
-_MOCK_DECISIONS = {
-    "BTC": ("TRADE", "long", 0.7),
-    "ETH": ("TRADE", "short", 0.65),
-    "SOL": ("WATCH", "long", 0.5),
-}
-
-#: ③ facts 固定响应：6 条覆盖四维度/三方向/多 topic（FactItem 全字段合法）
-_MOCK_FACTS_JSON = """{
-  "facts": [
-    {"claim": "TVL 30d 变化 +12.5%，7d +5.1%（协议）", "source": "defillama", "timestamp": "2026-08-20", "direction": "bull", "dimension": "fundamentals", "topic": "project"},
-    {"claim": "fees 24h $0.58M，7d 累计 $3.9M 连续增长", "source": "defillama", "timestamp": "2026-08-20", "direction": "bull", "dimension": "fundamentals", "topic": "adoption"},
-    {"claim": "价格 7d +8.2%，30d +21.0%，90d +45.1%", "source": "binance", "timestamp": "2026-08-20", "direction": "bull", "dimension": "market", "topic": "unknown"},
-    {"claim": "funding 0.0001 低于 7d 均值 0.00012（无拥挤）", "source": "binance_futures", "timestamp": "2026-08-20", "direction": "bull", "dimension": "sentiment", "topic": "unknown"},
-    {"claim": "2026-Q3 解锁流通量 1.2%，抛压临近", "source": "bing", "timestamp": "2026-08-20", "direction": "bear", "dimension": "news", "topic": "unlock"},
-    {"claim": "搜索显示核心团队匿名，2024 年 A 轮融资", "source": "bing", "timestamp": "2026-08-20", "direction": "neutral", "dimension": "news", "topic": "team"}
-  ]
-}"""
-
-#: ⑤ challenges 固定响应：2 条 ≤3，stance 双视角，refutes 指向决策字段
-_MOCK_CHALLENGES_JSON = """{
-  "challenges": [
-    {"claim": "TVL 30d 增速环比放缓，错价依据不可持续", "evidence": "defillama: TVL 30d +12.5%，低于此前 30d 增速", "severity": "high", "refutes": "mispricing", "stance": "conservative"},
-    {"claim": "2026-Q3 解锁 1.2% 流通量，催化剂窗口存疑", "evidence": "bing: 2026-Q3 解锁流通量 1.2%", "severity": "medium", "refutes": "catalyst", "stance": "aggressive"}
-  ]
-}"""
-
-#: ⑥ rebuttals 固定响应：1 accepted + 1 rebutted（accepted 只降不升可验证）
-_MOCK_REBUTTALS_JSON = """{
-  "rebuttals": [
-    {"challenge_claim": "TVL 30d 增速环比放缓，错价依据不可持续", "response": "TVL 增速仍为正且 fees 同步增长，增长质量未恶化，维持错价判断", "outcome": "rebutted"},
-    {"challenge_claim": "2026-Q3 解锁 1.2% 流通量，催化剂窗口存疑", "response": "承认解锁抛压风险，纳入风险清单并下调置信度", "outcome": "accepted"}
-  ]
-}"""
-
 #: 分支 bull 固定响应（02 票）：3 条，basis 引用 mock 恒定快照值
 #: （momentum 6.25 / sentiment 固定组件 / 微观结构 OI 0.0），与 mock 全链快照
 #: 逐值一致 → 核验必过（交叉验证：test_evidence 全量断言无剔除）
@@ -174,51 +135,11 @@ _MOCK_BEAR_JSON = """{
 }"""
 
 
-def _mock_decide_json(text: str) -> str:
-    """④ decide 固定响应：按摘要首行的"研究标的"取映射，其余 PASS。
-
-    TRADE/WATCH 时 trade_structure 必填（规格：进交易计划）；PASS 全空。
-    """
-    m = re.search(r"研究标的[:：]\s*([A-Za-z0-9]+)", text)
-    symbol = m.group(1) if m else ""
-    decision, direction, confidence = _MOCK_DECISIONS.get(symbol, ("PASS", "", 0.0))
-    return json.dumps(
-        {
-            "symbol": symbol,
-            "decision": decision,
-            "direction": direction,
-            "confidence": confidence,
-            "fundamental_thesis": "TVL 与 fees 同步增长，基本面增速领先价格（mock）",
-            "market_thesis": "价格 30d +21%，低于基本面增速，定价未充分反映（mock）",
-            "market_implied_expectation": "市场隐含预期偏保守，未定价增长持续性（mock）",
-            "mispricing": "mc_tvl 低于同类均值，存在低估空间（mock）",
-            "catalyst": "TVL 增长动能延续与生态采用扩张（mock）",
-            "risks": [],
-            "evidence": [
-                {
-                    "claim": "TVL 30d +12.5%",
-                    "source": "defillama",
-                    "timestamp": "2026-08-20",
-                }
-            ],
-            "data_quality": "mock 数据，字段齐全",
-            "fundamental_score": 6.5,
-            "quadrant": "III",
-            "valuation_summary": "估值低于同类均值（mock）",
-            "trade_structure": (
-                "分批建仓，回撤 5% 止损（mock）" if decision != "PASS" else ""
-            ),
-            "horizon": "short_term" if decision != "PASS" else "",
-        },
-        ensure_ascii=False,
-    )
-
-
 class _MockChatModel(FakeMessagesListChatModel):
     """SR_MOCK=1 确定性假模型：按 prompt 特征路由固定 JSON（07 票）。
 
     bind_tools 返回 self（假模型不真调工具，直接给最终 JSON，agent 一轮结束）；
-    ④⑥ 的 json_mode 由 nodes 层 ``_extract_json`` 解析，本模型只产 JSON 文本。
+    分支的 json_mode 由 nodes 层 ``_extract_json`` 解析，本模型只产 JSON 文本。
     """
 
     def bind_tools(self, tools, **kwargs):
@@ -226,20 +147,14 @@ class _MockChatModel(FakeMessagesListChatModel):
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
         text = " ".join(getattr(m, "content", "") or "" for m in messages)
-        if "事实收集员" in text:  # FACTS_PROMPT（03 票退役路径，05 清理）
-            content = _MOCK_FACTS_JSON
-        elif "对抗官" in text:  # CHALLENGE_PROMPT（退役路径）
-            content = _MOCK_CHALLENGES_JSON
-        elif "复审员" in text:  # FINALIZE_PROMPT（退役路径）
-            content = _MOCK_REBUTTALS_JSON
-        elif "多头证据研究员" in text:  # BULL_PROMPT
+        if "多头证据研究员" in text:  # BULL_PROMPT
             _MOCK_CALL_COUNTS["bull"] += 1
             content = _MOCK_BULL_JSON
         elif "空头证据研究员" in text:  # BEAR_PROMPT
             _MOCK_CALL_COUNTS["bear"] += 1
             content = _MOCK_BEAR_JSON
-        else:  # 旧 DECIDE_PROMPT（03 票退役路径）
-            content = _mock_decide_json(text)
+        else:  # 未知 prompt 兜底：空对象（调用方 .get("evidence") → []）
+            content = "{}"
         return ChatResult(
             generations=[ChatGeneration(message=AIMessage(content=content))]
         )

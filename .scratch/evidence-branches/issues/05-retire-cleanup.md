@@ -6,7 +6,7 @@
 
 **Status:** ready-for-agent
 
-- [ ] 旧符号零死引用（检索无命中）
-- [ ] review.py 校准及测试退役
-- [ ] 全量测试绿 + ruff 干净
-- [ ] master spec 回写完成（新拓扑 / 证据 schema / 工件定义）
+- [x] 旧符号零死引用（检索无命中）
+- [x] review.py 校准及测试退役
+- [x] 全量测试绿 + ruff 干净
+- [x] master spec 回写完成（新拓扑 / 证据 schema / 工件定义）

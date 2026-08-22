@@ -277,7 +277,7 @@ def test_sentiment_raw() -> None:
             "note": "价涨 OI 增：新多进场，趋势确认",
         },
     }
-    assert "DECIDE_PROMPT" in s["note"]
+    assert "funding 高=拥挤反向" in s["note"]  # 注记内嵌解读规则（05 票：不再指向已退役 prompt）
     # 缺失
     s2 = sig.sentiment_raw(None, None)
     assert all(v is None for v in s2["components"].values())

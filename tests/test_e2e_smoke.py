@@ -1,7 +1,7 @@
 """11 票验收：全链路联调与冒烟。
 
 mock 回归 + 异常注入 + 筛选器端到端走常规 pytest（conftest SR_MOCK=1 全离线）；
-真实 API 冒烟（BTC/UNI 全链含 search_web、真实筛选器产候选）需显式
+真实 API 冒烟（BTC/UNI 全链、真实筛选器产候选）需显式
 SR_SMOKE=1 开启——走真实网络，不进常规回归。
 """
 
@@ -44,7 +44,7 @@ def _latest() -> Path:
 def test_mock_full_chain_report_and_cost_model(monkeypatch, tmp_path):
     """验收 1+7（03/04 票改造）：mock 全链 6 token → 报告/工件生成 + 成本模型。
 
-    成本模型：两分支 × 6 token = 12 次调用（旧决策链退役，05 票清理）；
+    成本模型：两分支 × 6 token = 12 次调用；
     avg=2.0/token。工件一致性：candidates 仅候选列表 / 信号快照 diff 首跑全 new
     （旧 decision 型快照退役，04 票改为信号快照对比）。
     """
@@ -58,7 +58,7 @@ def test_mock_full_chain_report_and_cost_model(monkeypatch, tmp_path):
         assert (run_dir / f).is_file()
     assert (_latest() / "snapshot.json").is_file()
     assert (_latest() / "signal_diff.json").is_file()
-    # 成本模型（03 票）：两分支各 6 次 = 12（旧 18 次决策链退役）
+    # 成本模型（03 票）：两分支各 6 次 = 12
     assert dict(env._MOCK_CALL_COUNTS) == {"bull": 6, "bear": 6}
     assert meta["llm_calls"]["total"] == 12
     avg = meta["llm_calls"]["total"] / len(MOCK_TOKENS)
@@ -92,7 +92,7 @@ def _boom(*args, **kwargs):
 
 def test_offline_branch_errors_continue_report(monkeypatch, tmp_path):
     """验收 3（03 票改造）：断网跑分支不中断批——该 token 空清单 + errors 留痕，
-    报告仍生成（旧 challenge 断网测试随节点退役，05 票清理）。"""
+    报告仍生成（旧断网测试随节点退役，05 票清理）。"""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(env, "get_llm", _boom)
     _reset_counts()
@@ -197,12 +197,6 @@ def test_real_api_smoke_btc_uni(monkeypatch, tmp_path):
     order = run["meta"]["node_order"]
     assert order[0] == "collect_data" and order[-1] == "write_report"
     assert {"bull_research", "bear_research", "evidence_verify"} <= set(order)
-    # search_web 实测：六维查询模板（project/team/social/adoption/unlock/catalyst）出结果
-    from strategy_research.tools import search_web
-
-    text = search_web.invoke({"query": "UNI adoption"})
-    assert "不可用" not in text
-    assert "无搜索结果" not in text
 
 
 @requires_smoke

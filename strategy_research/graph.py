@@ -2,8 +2,8 @@
 
 两分支为并行边（fan-out/fan-in，无 reducer）：同消费冻结快照、各写各的字段
 （bull_evidence / bear_evidence），后写覆盖语义不变；无条件路由 / Command /
-interrupt / checkpointer；行为分化全部在节点内部。旧决策链节点（research_facts /
-decide / challenge / finalize / risk_check）已移除，函数保留死代码（05 票清理）。
+interrupt / checkpointer；行为分化全部在节点内部。旧决策链节点已随 05 票
+退役（符号零引用），图仅剩证据分支链。
 """
 
 from __future__ import annotations

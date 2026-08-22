@@ -1,14 +1,15 @@
 """LLM 上下文装配契约测试（预测能力 01 票）。
 
-契约：prompt 引用的关键字段在渲染出的摘要中必现——改 prompt 解读规则而渲染不同步
-时先红后绿；schemas 层再导出与 context 本体保持一致。
+契约：prompt 引用的关键字段在渲染出的摘要中必现——改 prompt 解读规则而渲染
+不同步时先红后绿；分支摘要是纯确定性快照，不含任何决策链产物（05 票：旧
+decide/challenge/finalize 摘要契约退役）。
 """
 
 from __future__ import annotations
 
 import pytest
 
-from strategy_research import context, schemas
+from strategy_research import context
 
 
 def _dp(value):
@@ -95,57 +96,37 @@ def _state_with(symbol="BTC"):
                 ]
             }
         },
-        "facts": {symbol: []},
-        "decisions": {},
-        "challenges": {},
     }
 
 
-class TestPromptRenderingContract:
-    """DECIDE_PROMPT 引用的关键字段，在渲染摘要中必现。"""
+class TestBranchSummaryContract:
+    """分支 prompt（BULL/BEAR）引用的关键字段，在渲染摘要中必现。"""
 
     @pytest.mark.parametrize(
         "field",
         [
-            "tvl_change_7d",  # 基本面增速比较（rule 3）
+            "tvl_change_7d",  # 基本面增速（basis 引用域 fundamentals）
             "tvl_change_30d",
-            "momentum",  # 信号解读（rule 4）
+            "momentum",  # 信号解读（basis 引用域 signals）
             "quadrant",
-            "funding",  # 多维度交叉验证（rule 5）
+            "funding",  # 多维度交叉验证
             "funding_trend",
             "funding_pctile_90d",
             "oi_price_divergence",
             "taker_buy_ratio_24h",
         ],
     )
-    def test_decide_prompt_field_renders(self, field):
-        summary = context.build_decide_summary("BTC", _state_with())
-        assert field in summary, f"DECIDE_PROMPT 引用 {field}，但 decide 摘要未渲染"
+    def test_branch_prompt_field_renders(self, field):
+        summary = context.build_branch_summary("BTC", _state_with())
+        assert field in summary, f"分支 prompt 引用 {field}，但摘要未渲染"
 
-    def test_summaries_sections(self):
-        """各摘要关键节：decide 事实证据节 / challenge 三节 / finalize 反方挑战节。"""
-        assert "== 事实证据（research_facts 产出）==" in context.build_decide_summary(
-            "BTC", _state_with()
-        )
-        state = _state_with()
-        state["decisions"]["BTC"] = {
-            "symbol": "BTC",
-            "decision": "TRADE",
-            "direction": "long",
-            "confidence": 0.7,
-        }
-        summary = context.build_challenge_summary("BTC", state)
-        assert "== 原决策 ==" in summary
-        assert "== 反方事实（预筛：多头取 bear / 空头取 bull）==" in summary
+    def test_branch_summary_is_deterministic_snapshot(self):
+        """分支摘要 = 纯确定性快照：信号节 + 指令行，无任何决策链产物。"""
+        summary = context.build_branch_summary("BTC", _state_with())
         assert "== 信号（确定性计算）==" in summary
-
-        state2 = _state_with()
-        state2["challenges"]["BTC"] = [
-            {"severity": "high", "stance": "conservative", "claim": "x", "evidence": "y"}
-        ]
-        final = context.build_finalize_summary("BTC", state2)
-        assert "== 反方挑战（≤3 条）==" in final
-        assert "[high/conservative] x" in final
+        assert "只提取证据，禁止结论。" in summary
+        assert "原决策" not in summary
+        assert "校准基线" not in summary
 
 
 class TestNoteSingleSource:
@@ -160,54 +141,6 @@ class TestNoteSingleSource:
         # mock 侧 note 同源（mock_signals_data 输出，不再逐字复制）
         mock_out = mock_ds.mock_signals_data("BTC", "protocol")
         assert mock_out["sentiment"]["note"] == context.SENTIMENT_NOTE
-        # 注记指向的解读规则锚点仍然成立（原 test_signals 断言语义保留）
-        assert "DECIDE_PROMPT" in context.SENTIMENT_NOTE
-
-
-class TestSchemasReexport:
-    """schemas 层兼容再导出与 context 本体一致。"""
-
-    def test_schemas_reexport(self):
-        for name in ("FACTS_PROMPT", "DECIDE_PROMPT", "CHALLENGE_PROMPT", "FINALIZE_PROMPT"):
-            assert getattr(schemas, name) is getattr(context, name)
-        # env mock 路由依赖的 prompt 特征标记未漂移
-        assert "事实收集员" in context.FACTS_PROMPT
-        assert "策略研究员" in context.DECIDE_PROMPT
-        assert "对抗官" in context.CHALLENGE_PROMPT
-        assert "复审员" in context.FINALIZE_PROMPT
-
-
-class TestCalibrationSection:
-    """13 票：校准基线节仅 ④⑥ 摘要携带（③⑤ 不带；无校准无节）。"""
-
-    def _with_cal(self):
-        state = _state_with()
-        state["meta"] = {"calibration_context": "累积方向判断 3 条（T+7d），命中率 0.667"}
-        return state
-
-    def test_calibration_section_scope(self):
-        decide = context.build_decide_summary("BTC", self._with_cal())
-        assert "== 校准基线（历史决策复盘，T+7d 方向命中）==" in decide
-        assert "累积方向判断 3 条" in decide
-
-        final = context.build_finalize_summary("BTC", self._with_cal())
-        assert "== 校准基线（历史决策复盘，T+7d 方向命中）==" in final
-
-        # ③ 采证只提取证据，不携带校准基线
-        facts = context.build_facts_summary("BTC", self._with_cal())
-        assert "校准基线" not in facts
-
-        # 无校准上下文 → 无节
-        no_cal = context.build_decide_summary("BTC", _state_with())
-        assert "校准基线" not in no_cal
-
-        # ⑤ 对抗也不携带（03 票验收）
-        state = self._with_cal()
-        state["decisions"]["BTC"] = {
-            "symbol": "BTC",
-            "decision": "TRADE",
-            "direction": "long",
-            "confidence": 0.7,
-        }
-        challenge = context.build_challenge_summary("BTC", state)
-        assert "校准基线" not in challenge
+        # 注记内嵌解读规则锚点（05 票：不再指向已退役 prompt）
+        assert "funding 高=拥挤反向" in context.SENTIMENT_NOTE
+        assert "funding_pctile_90d" in context.SENTIMENT_NOTE
