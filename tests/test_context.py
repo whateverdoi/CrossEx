@@ -211,3 +211,19 @@ class TestCalibrationSection:
     def test_no_calibration_no_section(self):
         summary = context.build_decide_summary("BTC", _state_with())
         assert "校准基线" not in summary
+
+
+class TestCalibrationSectionScope:
+    """校准基线仅 ④⑥ 携带（03 票验收：③ 采证与 ⑤ 对抗不带）。"""
+
+    def test_challenge_summary_does_not_carry(self):
+        state = _state_with()
+        state["meta"] = {"calibration_context": "累积方向判断 3 条（T+7d），命中率 0.667"}
+        state["decisions"]["BTC"] = {
+            "symbol": "BTC",
+            "decision": "TRADE",
+            "direction": "long",
+            "confidence": 0.7,
+        }
+        summary = context.build_challenge_summary("BTC", state)
+        assert "校准基线" not in summary

@@ -415,7 +415,7 @@ def _slug_for(symbol: str) -> str:
 
 
 def _price_ret(symbol: str, days: int) -> float | None:
-    """mock 日线 N 日收益率 %（与 nodes._ret 同口径）。"""
+    """mock 日线 N 日收益率 %（与 binance.trailing_return 同口径）。"""
     klines = mock_klines(symbol)
     if not klines or len(klines) < days + 2:
         return None

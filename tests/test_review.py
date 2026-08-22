@@ -33,7 +33,7 @@ _STD_KLINES = _kline_rows(
 )
 
 
-# ── _hit / _calibrate（纯函数） ─────────────────────────
+# ── _hit / calibrate（纯函数） ─────────────────────────
 
 
 class TestHitAndCalibrate:

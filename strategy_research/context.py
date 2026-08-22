@@ -314,7 +314,8 @@ def _calibration_lines(state: dict) -> list[str]:
     """校准基线节（13 票）：meta.calibration_context 由 review 渲染注入。
 
     无校准（首跑 / mock 模式 / 加载失败）→ 空列表（摘要不渲染该节）。
-    仅④⑥ 摘要携带（决策与复审消费自己的历史命中率）；③ 采证摘要不带（只提取证据）。
+    仅④⑥ 摘要携带（决策与复审消费自己的历史命中率）；③ 采证与⑤ 对抗不带
+    （③ 只提取证据；⑤ 对抗官只看原决策与反方事实，不带先验锚）。
     """
     cal = (state.get("meta") or {}).get("calibration_context")
     if not cal:
@@ -423,7 +424,6 @@ def build_challenge_summary(symbol: str, state: dict) -> str:
         )
     lines += ["", "== 信号（确定性计算）=="]
     lines += _signal_lines(symbol, state)
-    lines += _calibration_lines(state)
     return "\n".join(lines)
 
 
