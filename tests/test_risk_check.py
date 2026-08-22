@@ -209,7 +209,16 @@ def test_results_derivation_structure():
         "confidence": 0.0,
         "rebuttals": [],
         "risk_flags": [],
+        "signal_state": {
+            "momentum": None,
+            "quadrant": None,
+            "funding_pctile_90d": None,
+            "oi_price_divergence": None,
+        },
     }
+    # 确定性信号状态落盘（04 票）：BTC 有动量，quadrant 缺 → None（UNKNOWN 纪律）
+    assert btc["signal_state"]["momentum"] == -5.0
+    assert btc["signal_state"]["quadrant"] is None
 
 
 def test_batch_never_breaks_missing_final():
@@ -219,7 +228,16 @@ def test_batch_never_breaks_missing_final():
     out = nodes.risk_check(state)
     assert out["risk_flags"] == {"BTC": [], "ZZZ": []}
     assert len(out["results"]) == 2
-    assert out["results"][1] == {"rebuttals": [], "risk_flags": []}
+    assert out["results"][1] == {
+        "rebuttals": [],
+        "risk_flags": [],
+        "signal_state": {
+            "momentum": None,
+            "quadrant": None,
+            "funding_pctile_90d": None,
+            "oi_price_divergence": None,
+        },
+    }
 
 
 def test_mock_full_chain_risk_check_consistent():
@@ -236,3 +254,41 @@ def test_mock_full_chain_risk_check_consistent():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-q"])
+
+
+def test_signal_state_full_values():
+    """04 票：信号状态全字段落盘（momentum/quadrant/funding 分位/OI 背离标签）。"""
+    state = _mk_state(
+        {"BTC": _trade("BTC", "long")},
+        {
+            "BTC": {
+                "momentum": {"value": 3.5},
+                "divergence": {"value": {"quadrant": "III"}},
+            }
+        },
+    )
+    state["market_data"] = {"BTC": {"funding_pctile_90d": {"value": 85.0}}}
+    state["microstructure_data"] = {
+        "BTC": {
+            "oi_price_divergence": {
+                "value": {"label": "confirm_long", "note": "价涨 OI 增"}
+            }
+        }
+    }
+    out = nodes.risk_check(state)
+    assert out["results"][0]["signal_state"] == {
+        "momentum": 3.5,
+        "quadrant": "III",
+        "funding_pctile_90d": 85.0,
+        "oi_price_divergence": "confirm_long",
+    }
+
+
+def test_signal_state_error_entry_all_none():
+    """信号层失败（error 条目）→ 信号状态全 None（缺数据不等于矛盾）。"""
+    state = _mk_state(
+        {"BTC": _trade("BTC", "long")},
+        {"BTC": {"symbol": "BTC", "error": "信号计算异常"}},
+    )
+    out = nodes.risk_check(state)
+    assert all(v is None for v in out["results"][0]["signal_state"].values())

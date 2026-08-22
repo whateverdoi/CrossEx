@@ -384,3 +384,91 @@ class TestCalibrationContext:
     def test_load_records_corrupt_falls_back_empty(self, tmp_path):
         (tmp_path / "review_log.json").write_text("not json", encoding="utf-8")
         assert review.load_records(tmp_path) == []
+
+
+# ── 信号状态分桶（04 票：确定性信号层接受结果检验） ──
+
+
+class TestCalibrateBySignal:
+    def _rec(self, hit, quadrant=None, momentum=None, pct=None, oi=None):
+        return {
+            "hit_7d": hit,
+            "decision": "TRADE",
+            "confidence": 0.7,
+            "signal_state": {
+                "quadrant": quadrant,
+                "momentum": momentum,
+                "funding_pctile_90d": pct,
+                "oi_price_divergence": oi,
+            },
+        }
+
+    def test_buckets_by_quadrant_and_momentum(self):
+        stats = review.calibrate(
+            [
+                self._rec(True, "III", 5.0),
+                self._rec(False, "III", -2.0),
+                self._rec(True, "II", 8.0),
+                self._rec(True, None, 1.0),  # quadrant 缺失不计入 quadrant 桶
+            ]
+        )
+        q = {b["value"]: b for b in stats["by_signal"]["quadrant"]}
+        assert q["III"]["n"] == 2 and q["III"]["hit_rate"] == 0.5
+        assert q["II"]["n"] == 1 and q["II"]["hit_rate"] == 1.0
+        mom = {b["value"]: b for b in stats["by_signal"]["momentum"]}
+        assert mom["positive"]["n"] == 3 and mom["positive"]["hit_rate"] == 1.0
+        assert mom["negative"]["n"] == 1
+
+    def test_pctile_bins_and_oi_labels(self):
+        stats = review.calibrate(
+            [
+                self._rec(True, pct=90.0, oi="confirm_long"),
+                self._rec(False, pct=10.0, oi="weak_short"),
+                self._rec(True, pct=50.0, oi="confirm_long"),
+            ]
+        )
+        pct = {b["value"]: b for b in stats["by_signal"]["funding_pctile"]}
+        assert pct["extreme(≥80)"]["n"] == 1 and pct["extreme(≥80)"]["hit_rate"] == 1.0
+        assert pct["mild(≤20)"]["n"] == 1
+        assert pct["mid(21-79)"]["n"] == 1
+        oi = {b["value"]: b for b in stats["by_signal"]["oi_divergence"]}
+        assert oi["confirm_long"]["n"] == 2 and oi["confirm_long"]["hit_rate"] == 1.0
+        assert oi["weak_short"]["n"] == 1
+
+    def test_legacy_records_no_signal_state_empty_buckets(self):
+        """旧记录无 signal_state → 空桶（不误伤，不崩）。"""
+        stats = review.calibrate(
+            [{"hit_7d": True, "decision": "TRADE", "confidence": 0.7}]
+        )
+        assert all(v == [] for v in stats["by_signal"].values())
+
+    def test_signal_state_captured_in_records(self, tmp_path, monkeypatch):
+        """回看记录捕获 run.json 里的 signal_state（run 装配断言）。"""
+        run_dir = tmp_path / "20260101T000000Z000000"
+        run_dir.mkdir(parents=True)
+        (run_dir / "run.json").write_text(
+            json.dumps(
+                {
+                    "meta": {
+                        "run_ts": "2026-01-01T00:00:00+00:00",
+                        "mode": "live",
+                    },
+                    "results": [
+                        {
+                            "symbol": "BTC",
+                            "decision": "TRADE",
+                            "direction": "long",
+                            "confidence": 0.7,
+                            "signal_state": {"quadrant": "III", "momentum": 5.0},
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            review.binance, "fetch_klines", lambda *a, **k: _STD_KLINES
+        )
+        out = review.review_past_decisions(tmp_path, now=_NOW)
+        rec = out["records"][0]
+        assert rec["signal_state"] == {"quadrant": "III", "momentum": 5.0}

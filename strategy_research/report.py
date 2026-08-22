@@ -276,6 +276,17 @@ def _review_lines(review: dict | None) -> list[str]:
     )
     for dec, s in (stats.get("by_decision") or {}).items():
         lines.append(f"- {dec}：{s['n']} 条，命中率 {s['hit_rate']}")
+    by_sig = stats.get("by_signal") or {}
+    sig_keys = [k for k in ("quadrant", "momentum", "funding_pctile", "oi_divergence") if by_sig.get(k)]
+    if sig_keys:
+        lines += ["", "按信号状态分桶（T+7d 方向命中，旧运行无信号状态不计）：", ""]
+        for k in sig_keys:
+            lines.append(f"{k}：")
+            lines.append("| 取值 | 条数 | 命中率 |")
+            lines.append("|---|---|---|")
+            for b in by_sig[k]:
+                lines.append(f"| {b['value']} | {b['n']} | {b['hit_rate']} |")
+            lines.append("")
     lines.append("")
     lines.append("置信度分箱（T+7d 方向命中）：")
     lines.append("")

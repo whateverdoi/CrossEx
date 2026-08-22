@@ -589,3 +589,31 @@ def test_artifacts_include_scanner_snapshots():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-q"])
+
+
+def test_review_lines_renders_signal_buckets():
+    """04 票：决策复盘节渲染按信号状态分桶表（旧运行无信号状态 → 跳过该节）。"""
+    from strategy_research import report
+
+    review = {
+        "records": [{"hit_7d": True}],
+        "stats": {
+            "n": 1,
+            "hit_rate": 1.0,
+            "by_decision": {},
+            "by_confidence": [],
+            "by_signal": {
+                "quadrant": [{"value": "III", "n": 2, "hit_rate": 0.5}],
+                "momentum": [],
+                "funding_pctile": [],
+                "oi_divergence": [],
+            },
+        },
+    }
+    lines = report._review_lines(review)
+    text = "\n".join(lines)
+    assert "按信号状态分桶" in text
+    assert "quadrant：" in text
+    assert "| III | 2 | 0.5 |" in text
+    # 空桶不渲染
+    assert "momentum：" not in text

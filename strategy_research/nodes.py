@@ -751,6 +751,34 @@ def _ev_flags(symbol: str, analysis: dict, state: dict) -> list[str]:
     return [f"EV 不足: 动量/背离信号与{side_text}决策矛盾"]
 
 
+def _signal_state(symbol: str, state: dict) -> dict:
+    """确定性信号状态快照（04 票：随结果落盘，供回看按信号分桶）。
+
+    任一缺失 → None（UNKNOWN 纪律）；signals 层失败（error 条目）→ 全 None。
+    """
+    sig = (state.get("signals") or {}).get(symbol) or {}
+    none_all = {
+        "momentum": None,
+        "quadrant": None,
+        "funding_pctile_90d": None,
+        "oi_price_divergence": None,
+    }
+    if not sig or sig.get("error"):
+        return none_all
+    mom = (sig.get("momentum") or {}).get("value")
+    quad = ((sig.get("divergence") or {}).get("value") or {}).get("quadrant")
+    mkt = (state.get("market_data") or {}).get(symbol) or {}
+    ms = (state.get("microstructure_data") or {}).get(symbol) or {}
+    pct = (mkt.get("funding_pctile_90d") or {}).get("value")
+    od = (ms.get("oi_price_divergence") or {}).get("value") or {}
+    return {
+        "momentum": mom if isinstance(mom, (int, float)) else None,
+        "quadrant": quad if quad in ("I", "II", "III", "IV") else None,
+        "funding_pctile_90d": pct if isinstance(pct, (int, float)) else None,
+        "oi_price_divergence": od.get("label") if isinstance(od, dict) else None,
+    }
+
+
 def risk_check(state: dict) -> dict:
     """⑦ 风控终审（确定性）：EV 边界 + 组合集中度两条核验，只降不升（08 票）。
 
@@ -787,6 +815,7 @@ def risk_check(state: dict) -> dict:
                 **analysis,
                 "rebuttals": item.get("rebuttals") or [],
                 "risk_flags": flags,
+                "signal_state": _signal_state(symbol, state),
             }
         )
     return {"risk_flags": risk_flags, "results": results, "meta": meta}

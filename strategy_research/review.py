@@ -49,21 +49,50 @@ def _hit(direction: str, ret: float | None) -> bool | None:
     return ret > 0 if direction == "long" else ret < 0
 
 
+def _rate(rows: list[dict]) -> float | None:
+    """命中率（空列表 → None）。"""
+    return round(sum(r["hit_7d"] for r in rows) / len(rows), 3) if rows else None
+
+
+def _momentum_sign(value: object) -> str | None:
+    """动量符号分桶：positive / negative / zero；非数值 → None。"""
+    if not isinstance(value, (int, float)):
+        return None
+    return "positive" if value > 0 else "negative" if value < 0 else "zero"
+
+
+def _pctile_bin(value: object) -> str | None:
+    """funding 分位分桶：extreme(≥80) / mild(≤20) / mid(21-79)；非数值 → None。"""
+    if not isinstance(value, (int, float)):
+        return None
+    return "extreme(≥80)" if value >= 80 else "mild(≤20)" if value <= 20 else "mid(21-79)"
+
+
+def _bucket(rows: list[dict], key_fn) -> list[dict]:
+    """按 key_fn 取值分桶（None 不计），按取值名排序（确定性输出）。"""
+    groups: dict[str, list[dict]] = {}
+    for r in rows:
+        v = key_fn(r)
+        if v is None:
+            continue
+        groups.setdefault(str(v), []).append(r)
+    return [
+        {"value": k, "n": len(rs), "hit_rate": _rate(rs)} for k, rs in sorted(groups.items())
+    ]
+
+
 def calibrate(records: list[dict]) -> dict:
-    """命中率 + 置信度四分箱 + TRADE/WATCH 分组（ret_7d 判定）。
+    """命中率 + 置信度四分箱 + TRADE/WATCH 分组 + 信号分桶（ret_7d 判定）。
 
     UNAVAILABLE（ret_7d 缺失）不计入任何统计。
     """
-
-    def _rate(rows: list[dict]) -> float | None:
-        return round(sum(r["hit_7d"] for r in rows) / len(rows), 3) if rows else None
-
     valid = [r for r in records if r.get("hit_7d") is not None]
     stats: dict = {
         "n": len(valid),
         "hit_rate": _rate(valid),
         "by_confidence": [],
         "by_decision": {},
+        "by_signal": {},
     }
     edges = [0.0, *_CONF_BINS, 1.0]
     for lo, hi in pairwise(edges):
@@ -84,6 +113,16 @@ def calibrate(records: list[dict]) -> dict:
         sub = [r for r in valid if r.get("decision") == dec]
         if sub:
             stats["by_decision"][dec] = {"n": len(sub), "hit_rate": _rate(sub)}
+    # 04 票：按确定性信号状态分桶（旧记录无 signal_state → 空桶，不误伤）
+    ss = lambda r: r.get("signal_state") or {}
+    stats["by_signal"] = {
+        "quadrant": _bucket(valid, lambda r: ss(r).get("quadrant")),
+        "momentum": _bucket(valid, lambda r: _momentum_sign(ss(r).get("momentum"))),
+        "funding_pctile": _bucket(
+            valid, lambda r: _pctile_bin(ss(r).get("funding_pctile_90d"))
+        ),
+        "oi_divergence": _bucket(valid, lambda r: ss(r).get("oi_price_divergence")),
+    }
     return stats
 
 
@@ -174,6 +213,7 @@ def review_past_decisions(
                         "decision": dec,
                         "direction": direction,
                         "confidence": row.get("confidence"),
+                        "signal_state": row.get("signal_state") or {},
                         "run_ts": meta.get("run_ts"),
                         "run_dir": run_dir,
                         **rets,
