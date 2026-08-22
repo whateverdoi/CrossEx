@@ -122,14 +122,11 @@ class TestPromptRenderingContract:
         summary = context.build_decide_summary("BTC", _state_with())
         assert field in summary, f"DECIDE_PROMPT 引用 {field}，但 decide 摘要未渲染"
 
-    def test_decide_summary_has_facts_section(self):
-        """rule 2 证据规则引用的"事实证据"节必现。"""
+    def test_summaries_sections(self):
+        """各摘要关键节：decide 事实证据节 / challenge 三节 / finalize 反方挑战节。"""
         assert "== 事实证据（research_facts 产出）==" in context.build_decide_summary(
             "BTC", _state_with()
         )
-
-    def test_challenge_summary_sections(self):
-        """对抗摘要：原决策 + 反方事实 + 信号三节（CHALLENGE_PROMPT 消费面）。"""
         state = _state_with()
         state["decisions"]["BTC"] = {
             "symbol": "BTC",
@@ -142,21 +139,19 @@ class TestPromptRenderingContract:
         assert "== 反方事实（预筛：多头取 bear / 空头取 bull）==" in summary
         assert "== 信号（确定性计算）==" in summary
 
-    def test_finalize_summary_has_challenges_section(self):
-        """复审摘要：反方挑战节（FINALIZE_PROMPT 消费面）。"""
-        state = _state_with()
-        state["challenges"]["BTC"] = [
+        state2 = _state_with()
+        state2["challenges"]["BTC"] = [
             {"severity": "high", "stance": "conservative", "claim": "x", "evidence": "y"}
         ]
-        summary = context.build_finalize_summary("BTC", state)
-        assert "== 反方挑战（≤3 条）==" in summary
-        assert "[high/conservative] x" in summary
+        final = context.build_finalize_summary("BTC", state2)
+        assert "== 反方挑战（≤3 条）==" in final
+        assert "[high/conservative] x" in final
 
 
 class TestNoteSingleSource:
     """解读规则注记单一来源：signals 与 mock 输出同一常量。"""
 
-    def test_signals_note_is_context_constant(self):
+    def test_sentiment_note_single_source(self):
         from strategy_research import signals
         from strategy_research.datasources import mock as mock_ds
 
@@ -165,21 +160,17 @@ class TestNoteSingleSource:
         # mock 侧 note 同源（mock_signals_data 输出，不再逐字复制）
         mock_out = mock_ds.mock_signals_data("BTC", "protocol")
         assert mock_out["sentiment"]["note"] == context.SENTIMENT_NOTE
-
-    def test_sentiment_note_anchors_decide_prompt(self):
-        """注记指向的解读规则锚点仍然成立（原 test_signals 断言语义保留）。"""
+        # 注记指向的解读规则锚点仍然成立（原 test_signals 断言语义保留）
         assert "DECIDE_PROMPT" in context.SENTIMENT_NOTE
 
 
 class TestSchemasReexport:
     """schemas 层兼容再导出与 context 本体一致。"""
 
-    def test_reexports_match_context(self):
+    def test_schemas_reexport(self):
         for name in ("FACTS_PROMPT", "DECIDE_PROMPT", "CHALLENGE_PROMPT", "FINALIZE_PROMPT"):
             assert getattr(schemas, name) is getattr(context, name)
-
-    def test_prompt_markers_preserved(self):
-        """env mock 路由依赖的 prompt 特征标记未漂移。"""
+        # env mock 路由依赖的 prompt 特征标记未漂移
         assert "事实收集员" in context.FACTS_PROMPT
         assert "策略研究员" in context.DECIDE_PROMPT
         assert "对抗官" in context.CHALLENGE_PROMPT
@@ -187,43 +178,36 @@ class TestSchemasReexport:
 
 
 class TestCalibrationSection:
-    """13 票：校准基线节注入（仅④⑥ 摘要携带，③ 不带）。"""
+    """13 票：校准基线节仅 ④⑥ 摘要携带（③⑤ 不带；无校准无节）。"""
 
     def _with_cal(self):
         state = _state_with()
         state["meta"] = {"calibration_context": "累积方向判断 3 条（T+7d），命中率 0.667"}
         return state
 
-    def test_decide_summary_carries_section(self):
-        summary = context.build_decide_summary("BTC", self._with_cal())
-        assert "== 校准基线（历史决策复盘，T+7d 方向命中）==" in summary
-        assert "累积方向判断 3 条" in summary
+    def test_calibration_section_scope(self):
+        decide = context.build_decide_summary("BTC", self._with_cal())
+        assert "== 校准基线（历史决策复盘，T+7d 方向命中）==" in decide
+        assert "累积方向判断 3 条" in decide
 
-    def test_finalize_summary_carries_section(self):
-        summary = context.build_finalize_summary("BTC", self._with_cal())
-        assert "== 校准基线（历史决策复盘，T+7d 方向命中）==" in summary
+        final = context.build_finalize_summary("BTC", self._with_cal())
+        assert "== 校准基线（历史决策复盘，T+7d 方向命中）==" in final
 
-    def test_facts_summary_does_not_carry(self):
-        """③ 采证只提取证据，不携带校准基线。"""
-        summary = context.build_facts_summary("BTC", self._with_cal())
-        assert "校准基线" not in summary
+        # ③ 采证只提取证据，不携带校准基线
+        facts = context.build_facts_summary("BTC", self._with_cal())
+        assert "校准基线" not in facts
 
-    def test_no_calibration_no_section(self):
-        summary = context.build_decide_summary("BTC", _state_with())
-        assert "校准基线" not in summary
+        # 无校准上下文 → 无节
+        no_cal = context.build_decide_summary("BTC", _state_with())
+        assert "校准基线" not in no_cal
 
-
-class TestCalibrationSectionScope:
-    """校准基线仅 ④⑥ 携带（03 票验收：③ 采证与 ⑤ 对抗不带）。"""
-
-    def test_challenge_summary_does_not_carry(self):
-        state = _state_with()
-        state["meta"] = {"calibration_context": "累积方向判断 3 条（T+7d），命中率 0.667"}
+        # ⑤ 对抗也不携带（03 票验收）
+        state = self._with_cal()
         state["decisions"]["BTC"] = {
             "symbol": "BTC",
             "decision": "TRADE",
             "direction": "long",
             "confidence": 0.7,
         }
-        summary = context.build_challenge_summary("BTC", state)
-        assert "校准基线" not in summary
+        challenge = context.build_challenge_summary("BTC", state)
+        assert "校准基线" not in challenge

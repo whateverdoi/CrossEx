@@ -91,10 +91,8 @@ def test_fetch_protocol_fees_parses(monkeypatch: pytest.MonkeyPatch) -> None:
     }
 
 
-def test_fetch_stablecoin_supply_sums_latest_day(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """stablecoincharts/{chain}：取最新一天各币种 totalCirculatingUSD 求和。"""
+def test_fetch_stablecoin_supply(monkeypatch: pytest.MonkeyPatch) -> None:
+    """stablecoincharts/{chain}：最新一天求和；缺失项不计入标 incomplete；全缺失 → None。"""
     monkeypatch.setenv("SR_MOCK", "0")
     body = [
         {"date": 1700000000, "totalCirculatingUSD": {"peggedUSD": 100.0}},
@@ -105,35 +103,24 @@ def test_fetch_stablecoin_supply_sums_latest_day(
     ]
     row = defillama.fetch_stablecoin_supply("ethereum", client=_client(body))
     assert row == {"stablecoin_supply": 500.0, "incomplete": False}
-
-
-def test_fetch_stablecoin_supply_marks_incomplete(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """缺失项不计入（不按 0 猜测），标 incomplete；全缺失 → None。"""
-    monkeypatch.setenv("SR_MOCK", "0")
-    body = [{"date": 1, "totalCirculatingUSD": {"peggedUSD": 300.0, "broken": "x"}}]
-    row = defillama.fetch_stablecoin_supply("ethereum", client=_client(body))
-    assert row == {"stablecoin_supply": 300.0, "incomplete": True}
-
-    body_all_missing = [{"date": 1, "totalCirculatingUSD": {"a": "x"}}]
+    # 缺失项不计入（不按 0 猜测）→ incomplete；全缺失 → None
+    partial = [{"date": 1, "totalCirculatingUSD": {"peggedUSD": 300.0, "broken": "x"}}]
+    assert defillama.fetch_stablecoin_supply(
+        "ethereum", client=_client(partial)
+    ) == {"stablecoin_supply": 300.0, "incomplete": True}
+    all_missing = [{"date": 1, "totalCirculatingUSD": {"a": "x"}}]
     assert (
-        defillama.fetch_stablecoin_supply("ethereum", client=_client(body_all_missing))
+        defillama.fetch_stablecoin_supply("ethereum", client=_client(all_missing))
         is None
     )
 
 
-def test_fetch_dex_volume_global_parses(monkeypatch: pytest.MonkeyPatch) -> None:
-    """overview/dexs 全局 → {dex_volume_24h}（真实键名 total24h）。"""
+def test_fetch_dex_volume(monkeypatch: pytest.MonkeyPatch) -> None:
+    """overview/dexs：全局 → {dex_volume_24h}；chain 指定时带 chains 查询参数。"""
     monkeypatch.setenv("SR_MOCK", "0")
     body = {"total24h": 9876.5, "total7d": 50000.0}
     row = defillama.fetch_dex_volume_24h(client=_client(body))
     assert row == {"dex_volume_24h": 9876.5}
-
-
-def test_fetch_dex_volume_chain_param(monkeypatch: pytest.MonkeyPatch) -> None:
-    """chain 指定时带 chains 查询参数。"""
-    monkeypatch.setenv("SR_MOCK", "0")
     captured: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -144,16 +131,6 @@ def test_fetch_dex_volume_chain_param(monkeypatch: pytest.MonkeyPatch) -> None:
     defillama.fetch_dex_volume_24h(chain="solana", client=client)
     assert "chains=solana" in captured["url"]
     assert "excludeTotalDataChart=true" in captured["url"]
-
-
-def test_fetch_failure_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
-    """失败即失败：网络异常 → None（装配层标 UNKNOWN）。"""
-    monkeypatch.setenv("SR_MOCK", "0")
-    client = _client_raise(httpx.ConnectError("refused"))
-    assert defillama.fetch_protocol_tvl(PROTOCOL, client=client) is None
-    assert defillama.fetch_protocol_fees(PROTOCOL, client=client) is None
-    assert defillama.fetch_stablecoin_supply("ethereum", client=client) is None
-    assert defillama.fetch_dex_volume_24h(client=client) is None
 
 
 def test_mock_zero_external_requests(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -197,7 +174,8 @@ def test_token_slug_map_design() -> None:
     assert defillama.TOKEN_SLUG_MAP.get("XRP", "") == ""
 
 
-def test_fetch_chains_mock() -> None:
+def test_mock_shared_resources() -> None:
+    """mock 共享资源表：chains/protocols/stablecoins/dexs/fees/chain_tvl 形状齐备。"""
     chains = defillama.fetch_chains()
     assert isinstance(chains, dict) and len(chains) > 0
     name, row = next(iter(chains.items()))
@@ -205,44 +183,32 @@ def test_fetch_chains_mock() -> None:
     assert set(row) == {"tvl", "token_symbol"}
     assert isinstance(row["tvl"], float)
 
-
-def test_fetch_protocols_mock() -> None:
     index = defillama.fetch_protocols()
     assert isinstance(index, dict) and len(index) > 0
     assert all(isinstance(slug, str) for slug in index.values())
 
+    stable = defillama.fetch_stablecoins()
+    assert isinstance(stable, dict) and len(stable) > 0
+    assert all(isinstance(v, float) for v in stable.values())
 
-def test_fetch_stablecoins_mock() -> None:
-    table = defillama.fetch_stablecoins()
-    assert isinstance(table, dict) and len(table) > 0
-    assert all(isinstance(v, float) for v in table.values())
+    dexs = defillama.fetch_dexs()
+    assert isinstance(dexs, dict) and len(dexs) > 0
+    assert all(isinstance(v, float) for v in dexs.values())
 
+    fees = defillama.fetch_fees(["uniswap", "aave"])
+    assert set(fees) == {"uniswap", "aave"}
+    assert set(fees["uniswap"]) == {"fees_24h", "fees_7d", "revenue_24h", "revenue_7d"}
 
-def test_fetch_dexs_mock() -> None:
-    table = defillama.fetch_dexs()
-    assert isinstance(table, dict) and len(table) > 0
-    assert all(isinstance(v, float) for v in table.values())
-
-
-def test_fetch_fees_mock() -> None:
-    table = defillama.fetch_fees(["uniswap", "aave"])
-    assert set(table) == {"uniswap", "aave"}
-    assert set(table["uniswap"]) == {"fees_24h", "fees_7d", "revenue_24h", "revenue_7d"}
-
-
-def test_fetch_chain_tvl_mock() -> None:
-    """链 TVL mock：与 fetch_protocol_tvl 输出同构。"""
-    row = defillama.fetch_chain_tvl("solana")
-    assert set(row) == {"tvl", "tvl_change_1d", "tvl_change_7d", "tvl_change_30d"}
-    assert isinstance(row["tvl"], float)
+    chain_tvl = defillama.fetch_chain_tvl("solana")
+    assert set(chain_tvl) == {"tvl", "tvl_change_1d", "tvl_change_7d", "tvl_change_30d"}
+    assert isinstance(chain_tvl["tvl"], float)
 
 
 # ── 历史序列（06 票：工具层数据源）──────────────────────
 
 
-def test_fetch_protocol_tvl_history_mock_consistent() -> None:
-    """mock 历史与当前快照同构：时间升序（最新在末尾）、最新值 == tvl、
-    7d/30d 复合变化率回算 == tvl_change 字段（工具层可回算趋势）。"""
+def test_mock_history_consistent() -> None:
+    """mock 历史序列与当前快照同构：TVL 90 天回算变化率一致；fees/稳定币最新值一致。"""
     rows = defillama.fetch_protocol_tvl_history("uniswap")
     assert rows is not None and len(rows) == 90
     latest = rows[-1]["tvl"]
@@ -250,20 +216,14 @@ def test_fetch_protocol_tvl_history_mock_consistent() -> None:
     assert (latest / rows[-8]["tvl"] - 1) * 100 == pytest.approx(2.5, abs=0.01)
     assert (latest / rows[-31]["tvl"] - 1) * 100 == pytest.approx(10.0, abs=0.01)
 
+    fee_rows = defillama.fetch_protocol_fees_history("uniswap")
+    assert fee_rows is not None
+    assert fee_rows[-1]["fees"] == pytest.approx(10.0)
+    assert fee_rows[-1]["revenue"] == pytest.approx(5.0)
 
-def test_fetch_protocol_fees_history_mock_consistent() -> None:
-    """mock 费用历史：最新值 == 当前 fees_24h/revenue_24h。"""
-    rows = defillama.fetch_protocol_fees_history("uniswap")
-    assert rows is not None
-    assert rows[-1]["fees"] == pytest.approx(10.0)
-    assert rows[-1]["revenue"] == pytest.approx(5.0)
-
-
-def test_fetch_stablecoin_history_mock_consistent() -> None:
-    """mock 稳定币历史：最新值 == 当前供应量。"""
-    rows = defillama.fetch_stablecoin_history("ethereum")
-    assert rows is not None
-    assert rows[-1]["supply"] == pytest.approx(1.5e9)
+    sc_rows = defillama.fetch_stablecoin_history("ethereum")
+    assert sc_rows is not None
+    assert sc_rows[-1]["supply"] == pytest.approx(1.5e9)
 
 
 TVL_HIST_JSON = {
@@ -274,14 +234,29 @@ TVL_HIST_JSON = {
 }
 
 
-def test_fetch_protocol_tvl_history_parses(monkeypatch: pytest.MonkeyPatch) -> None:
-    """真实路径：/protocol/{slug} 的 tvl 数组 → [{date, tvl}]（顺序保留）。"""
+def test_history_parses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """真实路径解析：TVL 数组顺序保留；fees 单字段缺失保留；稳定币缺失币种跳过。"""
     monkeypatch.setenv("SR_MOCK", "0")
-    client = _client(TVL_HIST_JSON)
-    rows = defillama.fetch_protocol_tvl_history("uniswap", client=client)
-    assert rows == [
+    tvl_rows = defillama.fetch_protocol_tvl_history(
+        "uniswap", client=_client(TVL_HIST_JSON)
+    )
+    assert tvl_rows == [
         {"date": 1700000000, "tvl": 100.0},
         {"date": 1700086400, "tvl": 110.5},
+    ]
+    fee_rows = defillama.fetch_protocol_fees_history(
+        "uniswap", client=_client(FEES_HIST_JSON)
+    )
+    assert fee_rows == [
+        {"date": 1700000000, "fees": 10.0, "revenue": 5.0},
+        {"date": 1700086400, "fees": None, "revenue": 6.0},
+    ]
+    sc_rows = defillama.fetch_stablecoin_history(
+        "ethereum", client=_client(SC_HIST_JSON)
+    )
+    assert sc_rows == [
+        {"date": 1700000000, "supply": 100.0},
+        {"date": 1700086400, "supply": 110.0},
     ]
 
 
@@ -291,41 +266,10 @@ FEES_HIST_JSON = [
 ]
 
 
-def test_fetch_protocol_fees_history_parses(monkeypatch: pytest.MonkeyPatch) -> None:
-    """真实路径：fees 数组 → [{date, fees, revenue}]；单字段缺失保留。"""
-    monkeypatch.setenv("SR_MOCK", "0")
-    client = _client(FEES_HIST_JSON)
-    rows = defillama.fetch_protocol_fees_history("uniswap", client=client)
-    assert rows == [
-        {"date": 1700000000, "fees": 10.0, "revenue": 5.0},
-        {"date": 1700086400, "fees": None, "revenue": 6.0},
-    ]
-
-
 SC_HIST_JSON = [
     {"date": 1700000000, "totalCirculatingUSD": {"usdt": 100.0, "usdc": None}},
     {"date": 1700086400, "totalCirculatingUSD": {"usdt": 110.0}},
 ]
-
-
-def test_fetch_stablecoin_history_parses(monkeypatch: pytest.MonkeyPatch) -> None:
-    """真实路径：stablecoincharts → [{date, supply}]；缺失币种跳过。"""
-    monkeypatch.setenv("SR_MOCK", "0")
-    client = _client(SC_HIST_JSON)
-    rows = defillama.fetch_stablecoin_history("ethereum", client=client)
-    assert rows == [
-        {"date": 1700000000, "supply": 100.0},
-        {"date": 1700086400, "supply": 110.0},
-    ]
-
-
-def test_fetch_history_failure_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
-    """历史序列失败即失败：网络异常 → None（工具层转 UNKNOWN 文本）。"""
-    monkeypatch.setenv("SR_MOCK", "0")
-    client = _client_raise(httpx.ConnectError("refused"))
-    assert defillama.fetch_protocol_tvl_history("uniswap", client=client) is None
-    assert defillama.fetch_protocol_fees_history("uniswap", client=client) is None
-    assert defillama.fetch_stablecoin_history("ethereum", client=client) is None
 
 
 def test_fetch_chains_real_parses(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -436,10 +380,20 @@ def test_fetch_chain_tvl_real_parses(monkeypatch: pytest.MonkeyPatch) -> None:
     assert row["tvl_change_30d"] is None
 
 
-def test_shared_fetch_failure_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
-    """失败即失败：共享资源异常 → None（fetch_fees 例外：空表）。"""
+def test_failure_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """失败即失败：网络异常 → None（fetch_fees 例外：空表；装配层标 UNKNOWN）。"""
     monkeypatch.setenv("SR_MOCK", "0")
     client = _client_raise(httpx.ConnectError("refused"))
+    # 基础资源
+    assert defillama.fetch_protocol_tvl(PROTOCOL, client=client) is None
+    assert defillama.fetch_protocol_fees(PROTOCOL, client=client) is None
+    assert defillama.fetch_stablecoin_supply("ethereum", client=client) is None
+    assert defillama.fetch_dex_volume_24h(client=client) is None
+    # 历史序列
+    assert defillama.fetch_protocol_tvl_history("uniswap", client=client) is None
+    assert defillama.fetch_protocol_fees_history("uniswap", client=client) is None
+    assert defillama.fetch_stablecoin_history("ethereum", client=client) is None
+    # 共享资源
     assert defillama.fetch_chains(client=client) is None
     assert defillama.fetch_protocols(client=client) is None
     assert defillama.fetch_stablecoins(client=client) is None

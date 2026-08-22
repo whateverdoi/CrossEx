@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import os
 
+from strategy_research import env
 from strategy_research.graph import build_graph
 from strategy_research.screener import DEFAULT_RULES, select_tokens
 
@@ -41,6 +42,7 @@ def _resolve_tokens(args: argparse.Namespace) -> tuple[list[str], dict]:
 
 def main(argv: list[str] | None = None) -> dict:
     """主流程：解析 tokens → 建图 → invoke → 返回 meta（含 report_path）。"""
+    env.reset_call_counts()  # 每次运行计数从 0 开始（llm_calls = 本次运行）
     args = parse_args(argv)
     tokens, screening = _resolve_tokens(args)
     meta = {"screening": screening}

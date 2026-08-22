@@ -122,6 +122,32 @@ FINALIZE_PROMPT = """你是一名决策复审员。给定原决策与若干反�
 2. 为反驳而反驳无效：挑战数据扎实时必须 accepted；conservative 视角的挑战默认从严。
 3. 输出 JSON：{"rebuttals": [{"challenge_claim": "...", "response": "...", "outcome": "rebutted|accepted"}]}。"""
 
+#: 分支证据 prompt 共性头部（02 票：basis 引用契约——domain/field/value 逐字来自输入）
+_BRANCH_RULES = (
+    "严格遵守：\n"
+    "1. 严禁编造：claim 与 basis 只能引用输入数据中的既有字段与数值；缺失写 UNKNOWN，禁止猜测。\n"
+    "2. 每条证据必须包含：claim（主张）、basis（结构化数据引用三元组：domain 数据域 / "
+    "field 点号路径 / value 引用时点的快照值，逐字来自输入）、source（与 basis.domain 一致）。\n"
+    "3. basis.field 必须引用到输入中的标量层（含 .value 后缀），如 momentum.value、"
+    "divergence.value.quadrant、sentiment.components.funding；扫描器快照节字段自带完整"
+    "路径（如 market.BTC.price）。\n"
+    "4. 只提取"
+)
+
+_BRANCH_OUTPUT = (
+    "证据，禁止给出决策、结论或建议（那是后续决策者的工作）。\n"
+    "5. 数量 1-8 条，按重要性降序。\n"
+    "6. 输出 JSON：{\"evidence\": [{\"claim\": \"...\", \"basis\": "
+    "{\"domain\": \"...\", \"field\": \"...\", \"value\": \"...\"}, "
+    "\"source\": \"...\"}]}。"
+)
+
+BULL_PROMPT = """你是一名多头证据研究员。基于给定数据，列出支持做多该资产的结构化证据条目。
+""" + _BRANCH_RULES + "多头视角" + _BRANCH_OUTPUT
+
+BEAR_PROMPT = """你是一名空头证据研究员。基于给定数据，列出支持做空该资产的结构化证据条目。
+""" + _BRANCH_RULES + "空头视角" + _BRANCH_OUTPUT
+
 
 # ── 摘要构建器（③-⑥ 摘要，从 nodes 收敛至此）────────────────
 
@@ -325,6 +351,17 @@ def _calibration_lines(state: dict) -> list[str]:
 
 def build_facts_summary(symbol: str, state: dict) -> str:
     """③ 事实摘要：骨架 + 指令行（只提取证据，禁止结论）。"""
+    return "\n".join(
+        [*_facts_summary_lines(symbol, state), "", "只提取证据，禁止结论。"]
+    )
+
+
+def build_branch_summary(symbol: str, state: dict) -> str:
+    """分支摘要（02 票：bull/bear 共用同一确定性快照）：骨架 + 指令行。
+
+    与 build_facts_summary 同构但语义独立：分支不消费 facts 产物，
+    两分支各自从同一份确定性快照提取证据（03 票接线后生效）。
+    """
     return "\n".join(
         [*_facts_summary_lines(symbol, state), "", "只提取证据，禁止结论。"]
     )

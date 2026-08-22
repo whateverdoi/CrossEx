@@ -1,8 +1,10 @@
-"""09-10 票验收：⑧ 工件派生（candidates）+ 信号快照/对比 + overview 五节渲染。
+"""09-10/04 票验收：⑧ 工件派生（candidates）+ 信号快照/对比 + 证据 md 渲染。
 
-09：_build_artifacts/_build_signal_diff 纯函数直接单测；落盘经 build_report 走
-10：overview.md 五节（币种筛选/信号变化/对抗复审/候选清单/逐币分析）+ 成本统计
-（llm_calls）+ 端到端五工件一致性（mock 全链）。均用 tmp_path 隔离。
+09：_build_artifacts/_build_signal_diff 纯函数直接单测（04 票改信号快照语义）；
+04：证据 md（总览表 + 每 token 做多/做空表 + 剔除附录）经 _render_evidence_md
+纯函数断言（零落盘）；快照覆盖/首运行改走 _write_snapshot_and_diff 轻量落盘
+（不建时间戳目录）；落盘收敛为 3 个真用例（build_report 契约/错误路径/run.json
+结构）；端到端工件一致性并入 test_e2e_smoke 唯一全链 mock。均用 tmp_path 隔离。
 """
 
 from __future__ import annotations
@@ -44,199 +46,50 @@ def _mk_state(tokens, results=None, facts=None, volumes=None) -> dict:
     }
 
 
-def test_artifacts_full_fields():
-    """验收：artifacts 五字段——分层/分级/策略/置信度/理由/主题统计。"""
-    state = _mk_state(
-        ["BTC", "ETH"],
-        [
-            {
-                "symbol": "BTC",
-                "decision": "TRADE",
-                "direction": "long",
-                "confidence": 0.7,
-                "trade_structure": "分批建仓，回撤 5% 止损",
-                "mispricing": "mc_tvl 低估",
-                "catalyst": "TVL 增长",
-            },
-            {"symbol": "ETH", "decision": "PASS", "confidence": 0.0},
-        ],
-        facts={
-            "BTC": [
-                {"topic": "unlock"},
-                {"topic": "unlock"},
-                {"topic": "team"},
-                {"topic": ""},
-            ]
-        },
-        volumes={"BTC": 2e8, "ETH": 5e6},
-    )
-    a = report._build_artifacts(state)
-    btc = a["BTC"]
-    assert btc["liquidity_tier"] == "high"
-    assert btc["opportunity_level"] == "A"
-    assert btc["recommended_strategy"] == "long 分批建仓，回撤 5% 止损"
-    assert btc["confidence"] == 0.7
-    assert btc["rationale"] == "mc_tvl 低估 | catalyst: TVL 增长"
-    assert btc["catalysts"] == {"unlock": 2, "team": 1, "unknown": 1}
-    eth = a["ETH"]
-    assert eth["liquidity_tier"] == "low"
-    assert eth["opportunity_level"] == "D"
-    assert eth["recommended_strategy"] == "UNKNOWN"  # 无 direction/trade_structure
-
-
-def test_artifacts_tier_boundaries():
-    """liquidity_tier 确定性分层：>=1e8 high / >=1e7 mid / 其余 low。"""
-    state = _mk_state(
-        ["A", "B", "C", "D"],
-        [],
-        volumes={"A": 1e8, "B": 1e7, "C": 1e7 - 1, "D": None},
-    )
-    a = report._build_artifacts(state)
-    assert a["A"]["liquidity_tier"] == "high"
-    assert a["B"]["liquidity_tier"] == "mid"
-    assert a["C"]["liquidity_tier"] == "low"
-    assert a["D"]["liquidity_tier"] == "low"  # 缺失 → low
-
-
-def test_artifacts_downgraded_force_level_d():
-    """验收：downgraded 标记强制 D 级（无论底层决策）。"""
-    state = _mk_state(
-        ["BTC"],
-        [
-            {
-                "symbol": "BTC",
-                "decision": "WATCH",
-                "direction": "long",
-                "confidence": 0.6,
-                "downgraded": ["EV 不足: 动量/背离信号与多头决策矛盾"],
-            }
-        ],
-    )
-    assert report._build_artifacts(state)["BTC"]["opportunity_level"] == "D"
-
-
-def test_artifacts_level_mapping():
-    """机会分级映射：TRADE→A / WATCH→B / PASS→D / 未知→D。"""
-    state = _mk_state(
-        ["A", "B", "C", "D"],
-        [
-            {"symbol": "A", "decision": "TRADE"},
-            {"symbol": "B", "decision": "WATCH"},
-            {"symbol": "C", "decision": "PASS"},
-            {"symbol": "D", "decision": "XXX"},
-        ],
-    )
-    a = report._build_artifacts(state)
-    assert [a[s]["opportunity_level"] for s in "ABCD"] == ["A", "B", "D", "D"]
-
-
-def test_artifacts_empty_state_no_crash():
-    """验收：无 facts/results → 工件永远可生成（空节渲染不报错）。"""
-    state = {"tokens": ["BTC"], "results": [], "facts": {}, "market_data": {}}
-    a = report._build_artifacts(state)
-    assert a["BTC"]["catalysts"] == {}
-    assert a["BTC"]["liquidity_tier"] == "low"
-    assert a["BTC"]["opportunity_level"] == "D"
-
-
-def test_snapshot_structure():
-    """快照投影：results 轻量四字段（symbol/decision/direction/confidence）。"""
-    state = _mk_state(["BTC"], [_row("BTC", "TRADE", "long", 0.7, extra=1)])
-    snap = report._build_snapshot(state, "2026-08-21T00:00:00+00:00", "mock")
-    assert snap["run_ts"] == "2026-08-21T00:00:00+00:00"
-    assert snap["mode"] == "mock"
-    assert snap["tokens"] == ["BTC"]
-    assert snap["results"] == [
-        {"symbol": "BTC", "decision": "TRADE", "direction": "long", "confidence": 0.7}
-    ]
-
-
-def test_signal_diff_four_actions():
-    """验收：四种 action——new / hold / stop_short / stop_long + 其余→hold。"""
-    prev = {
-        "results": [
-            {"symbol": "HOLD", "decision": "WATCH", "direction": "long"},
-            {"symbol": "SS", "decision": "TRADE", "direction": "short"},
-            {"symbol": "SL", "decision": "TRADE", "direction": "long"},
-            {"symbol": "UP", "decision": "WATCH", "direction": "long"},
-            {"symbol": "SAME", "decision": "TRADE", "direction": "long"},
-        ]
-    }
-    cur = {
-        "results": [
-            {"symbol": "NEW", "decision": "WATCH", "direction": "long"},
-            {"symbol": "HOLD", "decision": "WATCH", "direction": "long"},
-            {"symbol": "SS", "decision": "WATCH", "direction": "short"},
-            {"symbol": "SL", "decision": "PASS", "direction": ""},
-            {"symbol": "UP", "decision": "TRADE", "direction": "long"},
-            {"symbol": "SAME", "decision": "TRADE", "direction": "long"},
-        ]
-    }
-    diff = report._build_signal_diff(prev, cur)
-    assert diff["NEW"]["action"] == "new"  # prev 缺失
-    assert diff["HOLD"]["action"] == "hold"  # prev==cur
-    assert diff["SS"]["action"] == "stop_short"  # prev TRADE/short 反转
-    assert diff["SL"]["action"] == "stop_long"  # prev TRADE/long 反转
-    assert diff["UP"]["action"] == "hold"  # 其余 → hold（cur 展示新状态）
-    assert diff["SAME"]["action"] == "hold"  # prev==cur 优先于 stop_long
-    assert diff["SL"]["cur"]["decision"] == "PASS"
-    assert diff["SL"]["prev"]["direction"] == "long"
-
-
 def test_build_report_writes_artifacts_snapshot_diff(monkeypatch, tmp_path):
-    """验收：candidates.json（reports/<ts> + latest 软链）+ snapshot/diff（latest）。"""
+    """验收（04 票）：candidates.json 仅候选列表（reports/<ts> + latest 软链）
+    + 信号快照/diff（latest）。"""
     monkeypatch.chdir(tmp_path)
-    state = _mk_state(
-        ["BTC"],
-        [_row("BTC", "WATCH", "long", 0.5)],
-        facts={"BTC": [{"topic": "unlock"}, {"topic": "team"}]},
-        volumes={"BTC": 2e8},
-    )
+    state = _evidence_state()
     run_dir, artifacts = report.build_report(state, {})
     cand = json.loads((run_dir / "candidates.json").read_text(encoding="utf-8"))
-    assert cand == artifacts
-    assert cand["BTC"]["liquidity_tier"] == "high"
-    assert cand["BTC"]["catalysts"] == {"unlock": 1, "team": 1}
+    assert cand == artifacts == {"candidates": ["BTC", "ETH"]}
     assert (Path("reports") / "latest" / "snapshot.json").is_file()
     assert (Path("reports") / "latest" / "signal_diff.json").is_file()
-    assert (Path("reports") / "latest" / "candidates.json").is_symlink()
+    # 三软链 + 快照/对比两文件（原 overview.md 软链退役）
+    for f in ("run.json", "evidence.md", "candidates.json"):
+        assert (Path("reports") / "latest" / f).is_symlink(), f
 
 
-def test_snapshot_overwrite_roundtrip_stop_long(monkeypatch, tmp_path):
-    """验收：先读旧为 prev 再覆盖——二次运行 TRADE→WATCH 得 stop_long。"""
+def test_snapshot_disk_roundtrip(monkeypatch, tmp_path):
+    """落盘语义（04 票信号快照）：首运行全 new → 二次信号变化得 changed（快照覆盖
+    为最新）→ 损坏快照视为无 prev（不抛异常）。轻量走 _write_snapshot_and_diff。"""
     monkeypatch.chdir(tmp_path)
-    report.build_report(_mk_state(["BTC"], [_row("BTC", "TRADE", "long", 0.7)]), {})
-    # 第二次运行：信号反转 → WATCH
-    report.build_report(_mk_state(["BTC"], [_row("BTC", "WATCH", "long", 0.5)]), {})
-    diff = json.loads(
-        (Path("reports") / "latest" / "signal_diff.json").read_text(encoding="utf-8")
-    )
-    assert diff["BTC"]["action"] == "stop_long"
-    assert diff["BTC"]["prev"]["decision"] == "TRADE"
-    assert diff["BTC"]["cur"]["decision"] == "WATCH"
-    snap = json.loads(
-        (Path("reports") / "latest" / "snapshot.json").read_text(encoding="utf-8")
-    )
-    assert snap["results"][0]["decision"] == "WATCH"  # 快照已覆盖为新
-
-
-def test_first_run_diff_all_new(monkeypatch, tmp_path):
-    """首次运行无 prev：全 token action=new（规格：输出空对比节语义）。"""
-    monkeypatch.chdir(tmp_path)
-    state = _mk_state(["BTC", "ETH"], [_row("BTC", "WATCH"), _row("ETH", "PASS", "")])
-    report.build_report(state, {})
+    report._write_snapshot_and_diff(_evidence_state(), "t0", "mock")
     diff = json.loads(
         (Path("reports") / "latest" / "signal_diff.json").read_text(encoding="utf-8")
     )
     assert diff["BTC"]["action"] == "new"
     assert diff["ETH"]["action"] == "new"
 
+    # 第二次运行：BTC momentum 6.25 → 5.0（信号变化）→ changed；ETH 不变 → unchanged
+    cur = _evidence_state()
+    cur["signals"]["BTC"]["momentum"]["value"] = 5.0
+    report._write_snapshot_and_diff(cur, "t2", "mock")
+    diff = json.loads(
+        (Path("reports") / "latest" / "signal_diff.json").read_text(encoding="utf-8")
+    )
+    assert diff["BTC"]["action"] == "changed"
+    assert diff["BTC"]["prev"]["momentum"] == 6.25
+    assert diff["BTC"]["cur"]["momentum"] == 5.0
+    assert diff["ETH"]["action"] == "unchanged"
+    snap = json.loads(
+        (Path("reports") / "latest" / "snapshot.json").read_text(encoding="utf-8")
+    )
+    assert snap["signals"]["BTC"]["momentum"] == 5.0  # 快照已覆盖为新
 
-def test_corrupt_snapshot_treated_as_no_prev(monkeypatch, tmp_path):
-    """损坏快照（非法 UTF-8/坏 JSON）→ 视为无 prev（首次运行语义），不抛异常。"""
-    monkeypatch.chdir(tmp_path)
+    # 损坏快照（非法 UTF-8/坏 JSON）→ 视为无 prev，不抛异常
     latest = Path("reports") / "latest"
-    latest.mkdir(parents=True)
     (latest / "snapshot.json").write_bytes(b"\xff\xfe\x00broken")
     assert report._read_prev_snapshot() is None
     (latest / "snapshot.json").write_text("{not json", encoding="utf-8")
@@ -244,7 +97,7 @@ def test_corrupt_snapshot_treated_as_no_prev(monkeypatch, tmp_path):
 
 
 def test_artifacts_failure_records_report_error(monkeypatch, tmp_path):
-    """失败语义：工件失败仅记 report_error，run.json/overview 不丢，批不中断。"""
+    """失败语义：工件失败仅记 report_error，run.json/evidence.md 不丢，批不中断。"""
     monkeypatch.chdir(tmp_path)
 
     def _boom(state):
@@ -256,193 +109,35 @@ def test_artifacts_failure_records_report_error(monkeypatch, tmp_path):
     assert "report_error" in meta
     assert "工件/快照落盘失败" in meta["report_error"]
     assert (run_dir / "run.json").is_file()
-    assert (run_dir / "overview.md").is_file()
-    assert artifacts == {"BTC": {}}  # 兜底形状与 write_report 异常路径一致
+    assert (run_dir / "evidence.md").is_file()
+    assert artifacts == {"candidates": []}  # 兜底形状与 write_report 异常路径一致
     assert not (run_dir / "candidates.json").exists()  # 失败工件不落盘
 
 
-# ── 10 票：overview 五节渲染 + 成本统计 ──────────────────────
+# ── 10 票：成本统计 ──────────────────────────────────────
 
 
-MOCK_TOKENS = ["BTC", "ETH", "SOL", "UNI", "DOGE", "XRP"]
-
-
-def _full_state() -> dict:
-    """五节全要素 state：results/facts/challenges/rebuttals/market_data。"""
-    state = _mk_state(
-        ["BTC", "ETH"],
-        [
-            _row(
-                "BTC",
-                "TRADE",
-                "long",
-                0.7,
-                trade_structure="分批建仓",
-                mispricing="mc_tvl 低估",
-                catalyst="TVL 增长",
-                downgraded=["杠杆降级"],
-            ),
-            _row("ETH", "PASS", "", 0.0),
-        ],
-        facts={
-            "BTC": [
-                {
-                    "dimension": "fundamentals",
-                    "topic": "unlock",
-                    "claim": "解锁 1.2% 流通量",
-                    "source": "mock",
-                }
-            ]
-        },
-        volumes={"BTC": 2e8, "ETH": 5e6},
-    )
-    state["challenges"] = {
-        "BTC": [
-            {
-                "severity": "high",
-                "stance": "aggressive",
-                "claim": "回调风险",
-                "evidence": "动量减弱",
-            }
-        ]
-    }
-    state["results"][0]["rebuttals"] = [
-        {"outcome": "rejected", "response": "趋势未破位"}
-    ]
-    return state
-
-
-def test_overview_five_sections(monkeypatch, tmp_path):
-    """验收：overview.md 五节齐备（含 LLM 调用行）。"""
-    monkeypatch.chdir(tmp_path)
-    screening = {
-        "mode": "auto",
-        "rules": ["PriceChangePct>=10", "RankQuoteVolume top 2"],
-        "candidates": [{"symbol": "BTC", "reason": "PriceChangePct>=10 | price_change_pct=12.5"}],
-    }
-    run_dir, _ = report.build_report(_full_state(), {"screening": screening})
-    md = (run_dir / "overview.md").read_text(encoding="utf-8")
-    for section in (
-        "## 币种筛选",
-        "## 信号变化（相对上一批）",
-        "## 对抗复审",
-        "## 候选清单",
-        "## 逐币分析",
-    ):
-        assert section in md
-    assert "LLM 调用" in md
-
-
-def test_overview_screening_manual_and_auto(monkeypatch, tmp_path):
-    """币种筛选节：manual 无规则/候选；auto 列规则 + 候选带 reason。"""
-    monkeypatch.chdir(tmp_path)
-    state = _mk_state(["BTC"], [_row("BTC")])
-    run_dir, _ = report.build_report(state, {"screening": {"mode": "manual"}})
-    md = (run_dir / "overview.md").read_text(encoding="utf-8")
-    assert "- 模式：`manual`" in md
-    assert "- 规则：" not in md
-    assert "- 候选：" not in md
-    screening = {
-        "mode": "auto",
-        "rules": ["PriceChangePct>=10", "RankQuoteVolume top 2"],
-        "candidates": [
-            {"symbol": "BTC", "reason": "PriceChangePct>=10 | price_change_pct=12.5"}
-        ],
-    }
-    run_dir, _ = report.build_report(state, {"screening": screening})
-    md = (run_dir / "overview.md").read_text(encoding="utf-8")
-    assert "规则：PriceChangePct>=10、RankQuoteVolume top 2" in md
-    assert "BTC：PriceChangePct>=10 | price_change_pct=12.5" in md
-
-
-def test_overview_signal_diff_table_roundtrip(monkeypatch, tmp_path):
-    """信号变化节：二次运行渲染对比表（prev/cur/action 对齐 signal_diff）。"""
-    monkeypatch.chdir(tmp_path)
-    report.build_report(_mk_state(["BTC"], [_row("BTC", "TRADE", "long", 0.7)]), {})
-    run_dir, _ = report.build_report(_mk_state(["BTC"], [_row("BTC", "WATCH", "long", 0.5)]), {})
-    md = (run_dir / "overview.md").read_text(encoding="utf-8")
-    assert "| BTC | TRADE/long | WATCH/long | stop_long |" in md
-    diff = json.loads(
-        (Path("reports") / "latest" / "signal_diff.json").read_text(encoding="utf-8")
-    )
-    assert diff["BTC"]["action"] == "stop_long"  # 与落盘 diff 一致
-
-
-def test_signal_diff_lines_empty_placeholder():
-    """无 diff（快照失败）→ 空节占位不报错（规格十节纪律 2）。"""
-    lines = report._signal_diff_lines({})
-    assert "（首次运行或快照失败，无上一批对比）" in "\n".join(lines)
-
-
-def test_overview_no_facts_challenges_empty_sections(monkeypatch, tmp_path):
-    """验收：无 facts/challenges → 空节占位不报错（报告永远可生成）。"""
-    monkeypatch.chdir(tmp_path)
-    state = {"tokens": ["BTC"], "results": [], "facts": {}, "market_data": {}}
-    run_dir, _ = report.build_report(state, {})
-    md = (run_dir / "overview.md").read_text(encoding="utf-8")
-    assert "（无——事实采证未产出）" in md
-    assert "（无挑战" in md
-    assert "- 挑战与反驳：（无）" in md
-    assert "（本批无候选工件）" not in md  # artifacts 兜底有 token 行
-    assert "| BTC | D | low | UNKNOWN |" in md
-
-
-def test_overview_per_token_summary(monkeypatch, tmp_path):
-    """逐币摘要：决策/direction/level/关键事实/挑战与反驳 + 降级行。"""
-    monkeypatch.chdir(tmp_path)
-    run_dir, _ = report.build_report(_full_state(), {})
-    md = (run_dir / "overview.md").read_text(encoding="utf-8")
-    # TRADE→A；downgraded 强制 D（验收：level 与决策/降级联动）
-    assert "决策：**TRADE**（direction: long，置信度 0.7，level D）" in md
-    assert "风控降级：杠杆降级" in md
-    assert "[fundamentals/unlock] 解锁 1.2% 流通量（mock）" in md
-    assert "挑战[high]：回调风险" in md
-    assert "回应[rejected]：趋势未破位" in md
-    assert "决策：**PASS**（direction: 未声明，置信度 0.0，level D）" in md
-
-
-def test_llm_calls_mock_and_live(monkeypatch):
-    """成本统计：mock 汇总假模型计数 + total；live 汇总 callback 计数。"""
-    monkeypatch.setattr(
-        report, "_MOCK_CALL_COUNTS", {"facts": 6, "decide": 6, "challenge": 3, "rebuttals": 3}
-    )
-    assert report._llm_calls() == {
-        "facts": 6,
-        "decide": 6,
-        "challenge": 3,
-        "rebuttals": 3,
-        "total": 18,
-    }
+def test_llm_calls_counting(monkeypatch) -> None:
+    """成本统计（03 票改造）：mock 汇总假模型计数 + total；live 汇总 callback 计数；handler 按 key 累加。"""
+    monkeypatch.setattr(report, "_MOCK_CALL_COUNTS", {"bull": 6, "bear": 6})
+    assert report._llm_calls() == {"bull": 6, "bear": 6, "total": 12}
     monkeypatch.setattr(report, "is_mock_mode", lambda: False)
-    monkeypatch.setattr(
-        report, "LIVE_CALL_COUNTS", {"facts": 2, "decide": 2, "challenge": 1, "rebuttals": 1}
-    )
-    assert report._llm_calls() == {
-        "facts": 2,
-        "decide": 2,
-        "challenge": 1,
-        "rebuttals": 1,
-        "total": 6,
-    }
+    monkeypatch.setattr(report, "LIVE_CALL_COUNTS", {"bull": 2, "bear": 2})
+    assert report._llm_calls() == {"bull": 2, "bear": 2, "total": 4}
 
-
-def test_live_call_counter_accumulates() -> None:
-    """live 计数 handler：on_llm_start 按 key 累加（含重试语义由 langchain 触发）。"""
     from strategy_research import env
 
-    env.LIVE_CALL_COUNTS["decide"] = 0
-    h = env.live_call_counter("decide")
+    env.LIVE_CALL_COUNTS["bull"] = 0
+    h = env.live_call_counter("bull")
     h.on_llm_start({}, [])
     h.on_llm_start({}, [])
-    assert env.LIVE_CALL_COUNTS["decide"] == 2
+    assert env.LIVE_CALL_COUNTS["bull"] == 2
 
 
 def test_run_json_meta_llm_calls(monkeypatch, tmp_path):
     """run.json meta 含 llm_calls，且同步进节点 meta（规格 state.meta.llm_calls）。"""
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(
-        report, "_MOCK_CALL_COUNTS", {"facts": 2, "decide": 1, "challenge": 0, "rebuttals": 0}
-    )
+    monkeypatch.setattr(report, "_MOCK_CALL_COUNTS", {"bull": 2, "bear": 1})
     meta: dict = {}
     run_dir, _ = report.build_report(_mk_state(["BTC"], [_row("BTC")]), meta)
     run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
@@ -450,192 +145,203 @@ def test_run_json_meta_llm_calls(monkeypatch, tmp_path):
     assert meta["llm_calls"]["total"] == 3
 
 
-def test_five_artifacts_latest(monkeypatch, tmp_path):
-    """验收：五工件全在 reports/latest/（三软链 + 快照/对比两文件）。"""
-    monkeypatch.chdir(tmp_path)
-    report.build_report(_mk_state(["BTC"], [_row("BTC")]), {})
-    latest = Path("reports") / "latest"
-    for f in ("run.json", "overview.md", "candidates.json"):
-        assert (latest / f).is_symlink(), f
-    assert (latest / "snapshot.json").is_file()
-    assert (latest / "signal_diff.json").is_file()
-
-
-def test_end_to_end_five_artifacts_consistent(monkeypatch, tmp_path):
-    """验收（端到端）：mock 全 6 token 跑完后五工件内容互相一致。
-
-    level 与 candidates 对齐（overview 候选清单 == candidates.json）；
-    signal_diff 与 snapshot 对照（首次全 new，diff.cur == snapshot.results）；
-    成本统计 == mock 调用计数。
-    """
-    monkeypatch.chdir(tmp_path)
-    from strategy_research import env
-    from strategy_research.graph import build_graph
-
-    for k in env._MOCK_CALL_COUNTS:
-        env._MOCK_CALL_COUNTS[k] = 0
-    result = build_graph().invoke({"tokens": MOCK_TOKENS, "meta": {}})
-    latest = Path("reports") / "latest"
-    run = json.loads((latest / "run.json").read_text(encoding="utf-8"))
-    cand = json.loads((latest / "candidates.json").read_text(encoding="utf-8"))
-    snap = json.loads((latest / "snapshot.json").read_text(encoding="utf-8"))
-    diff = json.loads((latest / "signal_diff.json").read_text(encoding="utf-8"))
-    md = (latest / "overview.md").read_text(encoding="utf-8")
-    # 成本统计与计数一致（mock：6 facts + 6 decide + 3 challenge + 3 rebuttals）
-    assert run["meta"]["llm_calls"]["total"] == sum(env._MOCK_CALL_COUNTS.values())
-    assert run["meta"]["llm_calls"]["total"] == 18
-    # 全量结果与 meta.tokens 对齐
-    assert run["meta"]["tokens"] == MOCK_TOKENS
-    assert [r["symbol"] for r in run["results"]] == MOCK_TOKENS
-    # level 与 candidates 对齐：overview 候选清单行 == candidates.json
-    for s in MOCK_TOKENS:
-        level = cand[s]["opportunity_level"]
-        assert level in {"A", "B", "D"}
-        assert f"| {s} | {level} |" in md
-    # diff 与 snapshot 对照：首次运行全 new，cur 侧 == 快照投影
-    for s in MOCK_TOKENS:
-        assert diff[s]["action"] == "new"
-        i = MOCK_TOKENS.index(s)
-        assert diff[s]["cur"]["decision"] == snap["results"][i]["decision"]
-        assert diff[s]["cur"]["decision"] == run["results"][i]["decision"]
-    assert result["meta"]["report_path"]  # 节点 meta 带报告路径
-    assert "## 信号变化（相对上一批）" in md
-
-
-_SNAP_SCANNER = {
-    "date": "2026-08-16",
-    "market": {
-        "BTC": {
-            "price": 0.009465,
-            "ret_24h": -10.3184,
-            "ret_7d": 132.2585,
-            "price_change_pct_24h": -8.668,
-            "quote_volume_24h": 202807691.0,
-            "funding_rate": 5e-05,
-            "taker_buy_ratio_24h": 0.4983,
-            "open_interest_value": 39484773.0,
-            "futures_premium_pct": 0.1501,
-            "listing_days": 324.0,
-            "onboard_date": "2025-09-26",
-            "boards": ["gain_1h", "loss_24h", "gain_7d"],
-        }
-    },
-    "microstructure": {
-        "BTC": {
-            "oi_change_24h": -0.5416,
-            "oi_change_48h": -27.8883,
-            "oi_value_change_24h": -10.0886,
-            "ls_ratio_all": 0.5172,
-            "ls_ratio_all_change_24h": -3.2186,
-            "ls_ratio_top_acc": 0.4286,
-            "ls_ratio_top_pos": 0.6445,
-            "taker_bs_ratio": 1.0105,
-            "funding_avg": 7.9e-05,
-            "funding_trend": "flat",
-        }
-    },
-}
-
-
-def test_overview_scanner_snapshot_sections(monkeypatch, tmp_path):
-    """验收：快照可用 → 逐币分析含市场数据/微观结构两小节，数值对齐用户表格。"""
-    monkeypatch.chdir(tmp_path)
-    state = _mk_state(["BTC"], [_row("BTC")])
-    state["scanner_snapshot"] = _SNAP_SCANNER
-    run_dir, _ = report.build_report(state, {})
-    md = (run_dir / "overview.md").read_text(encoding="utf-8")
-    assert "#### 市场数据快照" in md
-    assert "#### 市场微观结构快照" in md
-    assert "| 价格 | $0.009465 |" in md
-    assert "| 24h 涨跌 / 7d 涨跌 | -10.32% / 132.26%（交易所官方 24h 口径 -8.67%） |" in md
-    assert "| 24h 成交额 | $202,807,691 |" in md
-    assert "| 资金费率 | 0.0050% |" in md
-    assert "| 主动买入占比 (24h) | 49.83% |" in md
-    assert "| 持仓量名义价值 | $39,484,773 |" in md
-    assert "| 期现溢价 (mark/index − 1) | 0.150% |" in md
-    assert "| 上市天数 | 324.0 天（合约 2025-09-26 上线） |" in md
-    assert "| 所属榜单 (board) | gain_1h / loss_24h / gain_7d |" in md
-    assert "| OI 变化 24h / 48h | -0.54% / -27.89% |" in md
-    assert "| 全市场多空账户比 (24h 变化) | 0.52 (-3.22%) |" in md
-    assert "| 官方 taker 买卖比 | 1.01 |" in md
-    assert "| funding 近 7 天均值 | 0.0079%（年化 2.9%） |" in md
-    assert "| funding 趋势 (近 3 期 vs 前期) | flat |" in md
-    assert "增仓（新仓推动）vs 减仓（平仓/逼空）" in md  # 客观含义列
-    assert "（不可用——未找到 BinanceApi data/research CSV）" not in md
-
-
-def test_overview_scanner_snapshot_unavailable_placeholder(monkeypatch, tmp_path):
-    """验收：快照缺失 → 占位文本，报告仍生成（空节不报错）。"""
-    monkeypatch.chdir(tmp_path)
-    state = _mk_state(["BTC"], [_row("BTC")])
-    run_dir, _ = report.build_report(state, {})
-    md = (run_dir / "overview.md").read_text(encoding="utf-8")
-    assert "（不可用——未找到 BinanceApi data/research CSV）" in md
-    assert "#### 市场数据快照" not in md
-
-
-def test_artifacts_include_scanner_snapshots():
-    """验收：candidates 每币含 market_snapshot / microstructure_snapshot（缺失 {}）。"""
-    state = _mk_state(["BTC"], [_row("BTC")])
-    state["scanner_snapshot"] = _SNAP_SCANNER
-    a = report._build_artifacts(state)["BTC"]
-    assert a["market_snapshot"]["price"] == 0.009465
-    assert a["market_snapshot"]["boards"] == ["gain_1h", "loss_24h", "gain_7d"]
-    assert a["microstructure_snapshot"]["funding_trend"] == "flat"
-    a2 = report._build_artifacts(_mk_state(["BTC"], [_row("BTC")]))["BTC"]
-    assert a2["market_snapshot"] == {}
-    assert a2["microstructure_snapshot"] == {}
-
-
 if __name__ == "__main__":
     pytest.main([__file__, "-q"])
 
 
-def test_review_lines_renders_signal_buckets():
-    """04 票：决策复盘节渲染按信号状态分桶表（旧运行无信号状态 → 跳过该节）。"""
-    from strategy_research import report
+# ── 04 票：证据 md + 信号快照 + 工件简化 ──────────────────────
 
-    review = {
-        "records": [{"hit_7d": True}],
-        "stats": {
-            "n": 1,
-            "hit_rate": 1.0,
-            "by_decision": {},
-            "by_confidence": [],
-            "by_signal": {
-                "quadrant": [{"value": "III", "n": 2, "hit_rate": 0.5}],
-                "momentum": [],
-                "funding_pctile": [],
-                "oi_divergence": [],
-            },
+
+_ALL_SIGNAL_KEYS = [
+    "momentum",
+    "quadrant",
+    "funding_pctile_90d",
+    "oi_price_divergence",
+    "tvl_trend_30d",
+    "fees_trend_30d",
+    "stablecoin_change_30d",
+]
+
+
+def _evidence_state() -> dict:
+    """证据体系 state：evidence（bull/bear_case）+ rejected_evidence + 信号数据。"""
+    state = _mk_state(["BTC", "ETH"], [])
+    state["evidence"] = {
+        "BTC": {
+            "bull_case": [
+                {
+                    "claim": "动量分 6.25 处于增长区",
+                    "basis": {"domain": "signals", "field": "momentum.value", "value": "6.25"},
+                    "source": "signals",
+                },
+                {
+                    "claim": "资金费率 0.01% 偏低",
+                    "basis": {"domain": "signals", "field": "sentiment.components.funding", "value": "0.0001"},
+                    "source": "signals",
+                },
+                {
+                    "claim": "24h 成交额 2 亿美元",
+                    "basis": {"domain": "market_data", "field": "quote_volume_24h.value", "value": "200000000"},
+                    "source": "market_data",
+                },
+            ],
+            "bear_case": [
+                {
+                    "claim": "taker 买卖比 1.0 无买盘优势",
+                    "basis": {"domain": "signals", "field": "sentiment.components.taker_bs_ratio", "value": "1.0"},
+                    "source": "signals",
+                }
+            ],
+        },
+        "ETH": {"bull_case": [], "bear_case": []},
+    }
+    state["rejected_evidence"] = {
+        "BTC": [
+            {"claim": "TVL 上升", "reason": "字段不存在: tvl.value"},
+            {"claim": "OI 下降", "reason": "值不一致: 引用 1 vs 快照 0"},
+        ]
+    }
+    state["signals"] = {
+        "BTC": {"momentum": {"value": 6.25}, "divergence": {"value": {"quadrant": "III"}}},
+        "ETH": {"error": "模拟信号层失败"},
+    }
+    state["fundamental_data"] = {
+        "BTC": {
+            "tvl_trend_30d": {"value": "rising"},
+            "fees_trend_30d": {"value": "flat"},
+            "stablecoin_change_30d": {"value": 5.0},
+        },
+        "ETH": {
+            "tvl_trend_30d": {"value": None},
+            "fees_trend_30d": {"value": None},
+            "stablecoin_change_30d": {"value": None},
         },
     }
-    lines = report._review_lines(review)
-    text = "\n".join(lines)
-    assert "按信号状态分桶" in text
-    assert "quadrant：" in text
-    assert "| III | 2 | 0.5 |" in text
-    # 空桶不渲染
-    assert "momentum：" not in text
+    state["market_data"] = {
+        "BTC": {"funding_pctile_90d": {"value": 42.0}, "quote_volume_24h": {"value": 2e8}},
+        "ETH": {"funding_pctile_90d": {"value": None}},
+    }
+    state["microstructure_data"] = {
+        "BTC": {"oi_price_divergence": {"value": {"label": "negative"}}},
+        "ETH": {"oi_price_divergence": {"value": {}}},
+    }
+    return state
 
 
-def test_review_lines_renders_horizon_buckets():
-    """05 票：决策复盘节渲染评估窗口分桶（无 horizon 记录 → 不渲染）。"""
-    from strategy_research import report
+_ALL_NONE = {k: None for k in _ALL_SIGNAL_KEYS}
 
-    review = {
-        "records": [{"hit_7d": True}],
-        "stats": {
-            "n": 1,
-            "hit_rate": 1.0,
-            "by_decision": {},
-            "by_confidence": [],
-            "by_signal": {},
-            "by_horizon": [{"value": "trend", "n": 1, "hit_rate": 1.0}],
+
+def _render_evidence(state, meta=None) -> str:
+    """纯函数渲染证据 md（替代 build_report 落盘：零 I/O）。"""
+    run = {
+        "meta": {
+            "mode": "mock",
+            "tokens": state["tokens"],
+            "screening": (meta or {}).get("screening") or {"mode": "manual"},
+            "run_ts": "2026-08-21T00:00:00+00:00",
+            "node_order": [],
+            "llm_calls": (meta or {}).get("llm_calls") or {"total": 12},
         },
     }
-    text = "\n".join(report._review_lines(review))
-    assert "按评估窗口：trend → 1.0（n=1）" in text
+    return report._render_evidence_md(state, run)
 
-    review["stats"]["by_horizon"] = []
-    assert "按评估窗口" not in "\n".join(report._review_lines(review))
+
+def test_evidence_md_sections():
+    """验收：证据 md——总览表（token/多头/空头/数据域覆盖）+ 每 token 做多/做空表 + 剔除附录。"""
+    md = _render_evidence(_evidence_state())
+    assert "运行模式：`mock`" in md
+    assert "tokens：BTC, ETH" in md
+    assert "LLM 调用：12" in md
+    # 总览表
+    assert "| token | 多头证据数 | 空头证据数 | 数据域覆盖 |" in md
+    assert "| BTC | 3 | 1 | signals, market_data |" in md
+    assert "| ETH | 0 | 0 | — |" in md
+    # 每 token 节：做多/做空两张表（# | claim | basis | source）
+    assert "## BTC" in md
+    assert "### 做多证据" in md
+    assert "| # | claim | basis | source |" in md
+    assert "| 1 | 动量分 6.25 处于增长区 | signals.momentum.value = 6.25 | signals |" in md
+    assert "| 3 | 24h 成交额 2 亿美元 | market_data.quote_volume_24h.value = 200000000 | market_data |" in md
+    assert "### 做空证据" in md
+    assert "| 1 | taker 买卖比 1.0 无买盘优势 | signals.sentiment.components.taker_bs_ratio = 1.0 | signals |" in md
+    # 空证据占位 + 剔除附录
+    assert "## ETH" in md
+    assert "（无做多证据）" in md
+    assert "（无做空证据）" in md
+    assert "## 剔除记录" in md
+    assert "| token | claim | 原因 |" in md
+    assert "| BTC | TVL 上升 | 字段不存在: tvl.value |" in md
+    assert "| BTC | OI 下降 | 值不一致: 引用 1 vs 快照 0 |" in md
+
+
+def test_evidence_md_empty_state():
+    """空态：无证据/无剔除 → 占位不报错，报告仍生成。"""
+    md = _render_evidence(_mk_state(["BTC"], []))
+    assert "| BTC | 0 | 0 | — |" in md
+    assert "（无做多证据）" in md
+    assert "（无做空证据）" in md
+    assert "（本批无剔除记录）" in md
+
+
+def test_signal_snapshot_build():
+    """验收：snapshot.json 为信号快照——signals 投影（四字段 + 趋势特征），无 decision 语义。"""
+    snap = report._build_snapshot(_evidence_state(), "t0", "mock")
+    assert snap["run_ts"] == "t0"
+    assert snap["mode"] == "mock"
+    assert snap["tokens"] == ["BTC", "ETH"]
+    assert "results" not in snap
+    btc = snap["signals"]["BTC"]
+    assert btc["quadrant"] == "III"
+    assert btc["momentum"] == 6.25
+    assert btc["funding_pctile_90d"] == 42.0
+    assert btc["oi_price_divergence"] == "negative"
+    assert btc["tvl_trend_30d"] == "rising"
+    assert btc["fees_trend_30d"] == "flat"
+    assert btc["stablecoin_change_30d"] == 5.0
+    # signals 层失败 → 全 None（UNKNOWN 纪律）
+    assert snap["signals"]["ETH"] == _ALL_NONE
+
+
+def test_signal_diff_actions():
+    """验收：diff 信号对比三 action（new/changed/unchanged）；stop_short/stop_long 退役。"""
+    base = {k: v for k, v in zip(_ALL_SIGNAL_KEYS, [6.25, "III", 42.0, "negative", "rising", "flat", 5.0])}
+    prev = {"signals": {"SAME": dict(base), "CHG": dict(base)}}  # NEW 只在 cur（prev 缺失语义）
+    cur = {
+        "signals": {
+            "NEW": dict(base),
+            "SAME": dict(base),
+            "CHG": {**base, "momentum": 5.0},  # 单字段变化
+        }
+    }
+    diff = report._build_signal_diff(prev, cur)
+    assert diff["NEW"]["action"] == "new"  # prev 缺失
+    assert diff["SAME"]["action"] == "unchanged"
+    assert diff["CHG"]["action"] == "changed"
+    assert {d["action"] for d in diff.values()} <= {"new", "changed", "unchanged"}
+    assert diff["CHG"]["prev"]["momentum"] == 6.25
+    assert diff["CHG"]["cur"]["momentum"] == 5.0
+    # 首运行：prev=None → 全 new
+    first = report._build_signal_diff(None, cur)
+    assert all(d["action"] == "new" for d in first.values())
+
+
+def test_candidates_simplified():
+    """验收：candidates.json 仅候选列表（机会分级/流动性分层退役，spec D8）。"""
+    a = report._build_artifacts(_mk_state(["BTC", "ETH"], []))
+    assert a == {"candidates": ["BTC", "ETH"]}
+
+
+def test_run_json_evidence_and_snapshot(monkeypatch, tmp_path):
+    """验收：run.json 含证据清单（evidence/rejected_evidence）+ 数据快照投影 + 信号快照。"""
+    monkeypatch.chdir(tmp_path)
+    run_dir, _ = report.build_report(_evidence_state(), {})
+    run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    assert run["evidence"]["BTC"]["bull_case"][0]["claim"].startswith("动量分")
+    assert run["rejected_evidence"]["BTC"][0]["reason"].startswith("字段不存在")
+    assert run["data_snapshot"]["BTC"]["market_data"]["quote_volume_24h"]["value"] == 2e8
+    assert run["data_snapshot"]["BTC"]["fundamental_data"]["tvl_trend_30d"]["value"] == "rising"
+    assert run["data_snapshot"]["ETH"]["signals"]["error"] == "模拟信号层失败"
+    assert run["signals"]["BTC"]["momentum"] == 6.25
+    assert run["signals"]["BTC"]["quadrant"] == "III"
+    assert run["signals"]["BTC"]["tvl_trend_30d"] == "rising"
+    assert run["signals"]["ETH"] == _ALL_NONE

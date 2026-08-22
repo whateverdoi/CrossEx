@@ -31,6 +31,15 @@ class State(TypedDict, total=False):
     challenges: dict[str, list[dict]]
     final_decisions: dict[str, dict]
 
+    # 分支证据（02 票：bull/bear 各写各的字段，并行安全；evidence_verify 合并）
+    bull_evidence: dict[str, list[dict]]
+    bear_evidence: dict[str, list[dict]]
+    # 分支异常留痕（03 票：同样 side 独占，避免并行写共享键冲突）
+    bull_errors: dict[str, str]
+    bear_errors: dict[str, str]
+    evidence: dict[str, dict]
+    rejected_evidence: dict[str, list[dict]]
+
     # 风控终审（⑦ 写入）
     risk_flags: dict[str, list[str]]
     results: list[dict]

@@ -78,6 +78,18 @@ _PATCH_TARGETS: dict[str, tuple[str, object]] = {
         "strategy_research.nodes.defillama.fetch_chain_tvl",
         m.mock_chain_tvl,
     ),
+    "fetch_protocol_tvl_history": (
+        "strategy_research.nodes.defillama.fetch_protocol_tvl_history",
+        m.mock_protocol_tvl_history,
+    ),
+    "fetch_protocol_fees_history": (
+        "strategy_research.nodes.defillama.fetch_protocol_fees_history",
+        m.mock_protocol_fees_history,
+    ),
+    "fetch_stablecoin_history": (
+        "strategy_research.nodes.defillama.fetch_stablecoin_history",
+        m.mock_stablecoin_history,
+    ),
     "fetch_news_rss": (
         "strategy_research.nodes.web_ds.fetch_news_rss",
         lambda q, **kw: m.mock_news_rss(q),
@@ -165,10 +177,18 @@ def test_mock_collect_full_snapshot() -> None:
     assert fund["resolved"] is True
     assert fund["tvl"]["value"] is not None
     assert fund["fees_24h"]["value"] is not None
+    # 趋势特征（01 票）：mock TVL 序列 30 天 +10% → rising；费用恒定 → flat
+    assert fund["tvl_trend_30d"]["value"] == "rising"
+    assert fund["fees_trend_30d"]["value"] == "flat"
+    assert fund["stablecoin_change_30d"]["value"] is None  # 协议类结构性缺失
     fund_chain = res["fundamental_data"]["BTC"]
     assert fund_chain["kind"] == "chain" and fund_chain["name"] == "bitcoin"
     assert fund_chain["stablecoin_supply"]["value"] is not None
     assert fund_chain["dex_volume_24h"]["value"] is not None
+    # 趋势特征：链类取稳定币变化（mock 恒定 → 0%）；无协议 TVL/费用序列 → None
+    assert fund_chain["stablecoin_change_30d"]["value"] == 0.0
+    assert fund_chain["tvl_trend_30d"]["value"] is None
+    assert fund_chain["fees_trend_30d"]["value"] is None
 
     ms = res["microstructure_data"]["BTC"]
     assert set(ms) == {
@@ -216,6 +236,9 @@ def test_mock_shared_fetched_once(monkeypatch: pytest.MonkeyPatch) -> None:
         "fetch_top_long_short_position_ratio",
         "fetch_taker_long_short_ratio",
         "fetch_news_rss",
+        "fetch_protocol_tvl_history",
+        "fetch_protocol_fees_history",
+        "fetch_stablecoin_history",
     ):
         path, fn = _PATCH_TARGETS[name]
         counters[name] = _count(monkeypatch, path, fn)
@@ -247,12 +270,14 @@ def test_mock_shared_fetched_once(monkeypatch: pytest.MonkeyPatch) -> None:
     # 链类 4 个（BTC/ETH/SOL/DOGE）、协议类 2 个（UNI 静态 + XRP 兑底）
     assert counters["fetch_chain_tvl"]["n"] == 4
     assert counters["fetch_protocol_tvl"]["n"] == 2
+    # 趋势特征历史序列：per-token——协议 2 类各 2 次，链类稳定币 4 次
+    assert counters["fetch_protocol_tvl_history"]["n"] == 2
+    assert counters["fetch_protocol_fees_history"]["n"] == 2
+    assert counters["fetch_stablecoin_history"]["n"] == 4
 
 
-def test_mock_single_token_exception_does_not_abort(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """单 token 注入异常：仅该 token 标 error，批不中断。"""
+def test_failure_marks_unknown_not_abort(monkeypatch: pytest.MonkeyPatch) -> None:
+    """失败语义：单 token 异常仅标 error 批不中断；共享失败 → 数据点 UNKNOWN，批不中断。"""
     orig = nodes.binance.fetch_klines
 
     def boom(symbol: str, **kwargs):
@@ -270,11 +295,37 @@ def test_mock_single_token_exception_does_not_abort(
     assert res["market_data"]["BTC"]["price"]["value"] is not None  # 其余正常
     assert res["market_data"]["BTC"]["incomplete"] is False
 
+    # real 路径：共享资源失败 → 数据点 UNKNOWN + error/incomplete
+    monkeypatch.setenv("SR_MOCK", "0")
+    _patch_fetches(
+        monkeypatch,
+        {
+            "fetch_ticker_24h_all": None,
+            "fetch_premium_index_all": None,
+            "fetch_chain_tvl": None,
+        },
+    )
+    res = nodes.collect_data({"tokens": list(MOCK_TOKENS)})
+    assert set(res["market_data"]) == set(MOCK_TOKENS)  # 批不中断
+    mkt = res["market_data"]["BTC"]
+    assert mkt["error"] == "ticker 缺失"
+    assert mkt["price"]["value"] is None
+    assert mkt["futures_error"] == "premium 缺失"
+    assert mkt["incomplete"] is True
+    fund = res["fundamental_data"]["BTC"]
+    assert fund["error"] == "chain TVL 拉取失败"
+    assert fund["tvl"]["value"] is None
+    assert "BTC" in res["meta"]["incomplete_tokens"]
+    # 未失败 token 数据正常（XRP 走协议路径，tvl 不受 chain TVL 失败影响）
+    assert res["fundamental_data"]["XRP"]["resolved"] is True
+    assert res["fundamental_data"]["XRP"]["tvl"]["value"] is not None
 
-def test_real_full_snapshot_with_patched_fetches(
+
+def test_real_path_maps_fields_and_unknown_kind(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """真实路径（全 fake）：字段映射 / source 白名单 / 聚合字段正确。"""
+    """真实路径（全 fake）：字段映射 / source 白名单 / 聚合字段正确；
+    静态映射未命中 + 兜底失败 → kind=unknown，resolved=False。"""
     monkeypatch.setenv("SR_MOCK", "0")
     _patch_fetches(monkeypatch)
     res = nodes.collect_data({"tokens": list(MOCK_TOKENS)})
@@ -299,60 +350,45 @@ def test_real_full_snapshot_with_patched_fetches(
     web = res["web_data"]["BTC"]
     assert web["items"] is not None
 
-
-def test_real_failure_marks_unknown_not_abort(monkeypatch: pytest.MonkeyPatch) -> None:
-    """失败即失败：共享资源失败 → 数据点 UNKNOWN + error/incomplete，批不中断。"""
-    monkeypatch.setenv("SR_MOCK", "0")
-    _patch_fetches(
-        monkeypatch,
-        {
-            "fetch_ticker_24h_all": None,
-            "fetch_premium_index_all": None,
-            "fetch_chain_tvl": None,
-        },
-    )
-    res = nodes.collect_data({"tokens": list(MOCK_TOKENS)})
-
-    assert set(res["market_data"]) == set(MOCK_TOKENS)  # 批不中断
-    mkt = res["market_data"]["BTC"]
-    assert mkt["error"] == "ticker 缺失"
-    assert mkt["price"]["value"] is None
-    assert mkt["futures_error"] == "premium 缺失"
-    assert mkt["incomplete"] is True
-    fund = res["fundamental_data"]["BTC"]
-    assert fund["error"] == "chain TVL 拉取失败"
-    assert fund["tvl"]["value"] is None
-    assert "BTC" in res["meta"]["incomplete_tokens"]
-    # 未失败 token 数据正常（XRP 走协议路径，tvl 不受 chain TVL 失败影响）
-    assert res["fundamental_data"]["XRP"]["resolved"] is True
-    assert res["fundamental_data"]["XRP"]["tvl"]["value"] is not None
-
-
-def test_real_unknown_kind_fundamental(monkeypatch: pytest.MonkeyPatch) -> None:
-    """静态映射未命中 + 惰性兜底失败 → kind=unknown，resolved=False。"""
-    monkeypatch.setenv("SR_MOCK", "0")
+    # 趋势特征（01 票）：真实路径与 mock 同源序列 → 逐值一致
+    fund = res["fundamental_data"]["UNI"]
+    assert fund["tvl_trend_30d"]["value"] == "rising"
+    assert fund["fees_trend_30d"]["value"] == "flat"
+    assert res["fundamental_data"]["BTC"]["stablecoin_change_30d"]["value"] == 0.0
+    
+    # 静态映射未命中 + 惰性兜底失败 → kind=unknown
     _patch_fetches(monkeypatch, {"fetch_protocols": None})
-    res = nodes.collect_data({"tokens": ["ZZZ"]})
-
-    fund = res["fundamental_data"]["ZZZ"]
+    res_zzz = nodes.collect_data({"tokens": ["ZZZ"]})
+    fund = res_zzz["fundamental_data"]["ZZZ"]
     assert fund["kind"] == "unknown"
     assert fund["resolved"] is False
     assert fund["tvl"]["value"] is None
     assert fund["incomplete"] is True
-    assert "ZZZ" in res["meta"]["incomplete_tokens"]
+    assert "ZZZ" in res_zzz["meta"]["incomplete_tokens"]
+
+
+def test_trend_features_failure_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
+    """历史序列拉取失败：趋势特征 None（UNKNOWN 纪律），主数据与批不受影响。"""
+    monkeypatch.setattr(
+        "strategy_research.nodes.defillama.fetch_protocol_tvl_history",
+        lambda *a, **k: None,
+    )
+    res = nodes.collect_data({"tokens": ["UNI", "BTC"]})
+    fund = res["fundamental_data"]["UNI"]
+    assert fund["tvl_trend_30d"]["value"] is None
+    assert fund["tvl"]["value"] is not None  # 主数据不受影响
+    assert fund["incomplete"] is False  # 趋势特征缺失不置 incomplete
+    assert res["fundamental_data"]["BTC"]["stablecoin_change_30d"]["value"] == 0.0
 
 
 # ── 校准基线加载（13 票：① 注入 meta，③-⑥ 摘要消费） ──
 
 
-def test_mock_mode_skips_calibration_context() -> None:
-    """mock 模式不注入（mock 决策不进评估池，隔离保持一致）。"""
-    res = nodes.collect_data({"tokens": ["BTC"]})
-    assert "calibration_context" not in res["meta"]
+def test_calibration_context_modes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """校准基线：mock 不注入（mock 决策不进评估池）；live 注入历史渲染；
+    加载失败仅记 calibration_error，不中断批。"""
+    assert "calibration_context" not in nodes.collect_data({"tokens": ["BTC"]})["meta"]
 
-
-def test_live_mode_loads_calibration_context(monkeypatch: pytest.MonkeyPatch) -> None:
-    """live 模式：历史记录渲染为校准基线注入 meta（确定性、零 LLM）。"""
     monkeypatch.setenv("SR_MOCK", "0")
     _patch_fetches(monkeypatch)
     monkeypatch.setattr(
@@ -360,14 +396,8 @@ def test_live_mode_loads_calibration_context(monkeypatch: pytest.MonkeyPatch) ->
         "load_records",
         lambda *a, **k: [{"hit_7d": True, "decision": "TRADE", "confidence": 0.8}],
     )
-    res = nodes.collect_data({"tokens": ["BTC"]})
-    assert "命中率" in res["meta"]["calibration_context"]
+    assert "命中率" in nodes.collect_data({"tokens": ["BTC"]})["meta"]["calibration_context"]
 
-
-def test_live_mode_calibration_failure_isolated(monkeypatch: pytest.MonkeyPatch) -> None:
-    """校准加载失败仅记 calibration_error，不中断批。"""
-    monkeypatch.setenv("SR_MOCK", "0")
-    _patch_fetches(monkeypatch)
     monkeypatch.setattr(
         nodes.review_mod, "load_records", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
     )

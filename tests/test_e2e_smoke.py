@@ -23,7 +23,6 @@ from strategy_research.screener import (
 )
 
 MOCK_TOKENS = ["BTC", "ETH", "SOL", "UNI", "DOGE", "XRP"]
-_ACTIVE = {"BTC", "ETH", "SOL"}  # mock decide 映射：TRADE/long、TRADE/short、WATCH/long
 requires_smoke = pytest.mark.skipif(
     os.environ.get("SR_SMOKE") != "1",
     reason="真实冒烟需显式 SR_SMOKE=1（走真实网络，不进常规回归）",
@@ -43,10 +42,11 @@ def _latest() -> Path:
 
 
 def test_mock_full_chain_report_and_cost_model(monkeypatch, tmp_path):
-    """验收 1+7：mock 全链 6 token → 报告/工件生成 + 成本模型符合规格七节。
+    """验收 1+7（03/04 票改造）：mock 全链 6 token → 报告/工件生成 + 成本模型。
 
-    规格七节：PASS 2 次（③+④）/ TRADE-WATCH 4 次（③④⑤⑥）；
-    ≈2.6/token 是 20% 非 PASS 的估算，mock 50% 活跃 → 3.0，同一线性模型。
+    成本模型：两分支 × 6 token = 12 次调用（旧决策链退役，05 票清理）；
+    avg=2.0/token。工件一致性：candidates 仅候选列表 / 信号快照 diff 首跑全 new
+    （旧 decision 型快照退役，04 票改为信号快照对比）。
     """
     monkeypatch.chdir(tmp_path)
     _reset_counts()
@@ -54,40 +54,33 @@ def test_mock_full_chain_report_and_cost_model(monkeypatch, tmp_path):
     meta = result["meta"]
     assert meta["report_path"]  # 报告目录落盘
     run_dir = Path(meta["report_path"])
-    for f in ("run.json", "overview.md", "candidates.json"):
+    for f in ("run.json", "evidence.md", "candidates.json"):
         assert (run_dir / f).is_file()
     assert (_latest() / "snapshot.json").is_file()
     assert (_latest() / "signal_diff.json").is_file()
-    # 成本模型：3 活跃 × 4 + 3 PASS × 2 = 18
-    assert dict(env._MOCK_CALL_COUNTS) == {
-        "facts": 6,
-        "decide": 6,
-        "challenge": 3,
-        "rebuttals": 3,
-    }
-    assert meta["llm_calls"]["total"] == 18
+    # 成本模型（03 票）：两分支各 6 次 = 12（旧 18 次决策链退役）
+    assert dict(env._MOCK_CALL_COUNTS) == {"bull": 6, "bear": 6}
+    assert meta["llm_calls"]["total"] == 12
     avg = meta["llm_calls"]["total"] / len(MOCK_TOKENS)
-    assert avg == (2 * 3 + 4 * 3) / 6  # PASS 2 / 活跃 4 线性模型
-    assert 2.0 <= avg <= 4.0  # 规格七节区间：PASS 下限 2，活跃上限 4
-
-
-def test_mock_pass_tokens_zero_adversarial_calls(monkeypatch, tmp_path):
-    """验收 1：PASS 透传路径零对抗调用（⑤⑥ 跳过，challenge/rebuttals 仅活跃 token）。"""
-    monkeypatch.chdir(tmp_path)
-    _reset_counts()
-    result = build_graph().invoke({"tokens": MOCK_TOKENS, "meta": {}})
+    assert avg == 2.0  # 两分支每 token 各 1 次
+    # 分支产物与核验：mock 恒定引用全通过，无剔除
     for s in MOCK_TOKENS:
-        row = result["results"][result["tokens"].index(s)]
-        if s in _ACTIVE:
-            assert row["decision"] in ("TRADE", "WATCH")
-            assert row["rebuttals"]  # 活跃 token 有对抗
-        else:
-            assert row["decision"] == "PASS"
-            assert row["rebuttals"] == []  # 透传零对抗
-            assert (result["challenges"].get(s) or []) == []
-    # 计数佐证：challenge/rebuttals 只来自 3 个活跃 token
-    assert env._MOCK_CALL_COUNTS["challenge"] == 3
-    assert env._MOCK_CALL_COUNTS["rebuttals"] == 3
+        assert result["bull_evidence"][s] and result["bear_evidence"][s]
+        assert result["evidence"][s]["bull_case"] and result["evidence"][s]["bear_case"]
+    assert result["rejected_evidence"] == {}
+    # 工件一致性（04 票）：candidates 仅候选列表；信号快照首跑无上一批 → 全 new
+    run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    diff = json.loads((_latest() / "signal_diff.json").read_text(encoding="utf-8"))
+    md = (run_dir / "evidence.md").read_text(encoding="utf-8")
+    cand = json.loads((run_dir / "candidates.json").read_text(encoding="utf-8"))
+    assert run["meta"]["tokens"] == MOCK_TOKENS
+    assert run["meta"]["node_order"][-1] == "write_report"
+    assert run["evidence"] and run["rejected_evidence"] == {}  # 证据清单/剔除
+    assert run["signals"]  # 信号快照投影
+    assert cand == {"candidates": MOCK_TOKENS}  # 仅候选列表，分级退役
+    assert {d["action"] for d in diff.values()} == {"new"}  # 首跑全 new
+    assert "## 总览" in md
+    assert "### 做多证据" in md and "### 做空证据" in md
 
 
 # ── 2/3. 异常注入（断网）全链级 ──────────────────────────
@@ -97,30 +90,24 @@ def _boom(*args, **kwargs):
     raise RuntimeError("模拟断网：模型不可用")
 
 
-def test_offline_challenge_batch_continues_report_generated(monkeypatch, tmp_path):
-    """验收 3：断网跑 challenge 不中断批——该 token 挑战置空/降级，报告仍生成。"""
+def test_offline_branch_errors_continue_report(monkeypatch, tmp_path):
+    """验收 3（03 票改造）：断网跑分支不中断批——该 token 空清单 + errors 留痕，
+    报告仍生成（旧 challenge 断网测试随节点退役，05 票清理）。"""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(env, "get_llm", _boom)
     _reset_counts()
     result = build_graph().invoke({"tokens": MOCK_TOKENS, "meta": {}})
-    # 批完成：全部 token 有 results 行 + 报告可生成
-    assert len(result["results"]) == len(MOCK_TOKENS)
+    # 批完成：全部 token 空清单 + 错误留痕 + 报告可生成
     assert result["meta"]["report_path"]
-    assert (Path(result["meta"]["report_path"]) / "overview.md").is_file()
+    assert (Path(result["meta"]["report_path"]) / "evidence.md").is_file()
     assert (_latest() / "run.json").is_file()
-    # 无报告级错误：兜底路径接管（fallback 已记录在行内）
     assert "report_error" not in result["meta"]
-
-
-def test_offline_decide_fallback_pass_reported(monkeypatch, tmp_path):
-    """验收 3 延伸：decide 断网 → PASS 兜底 + fallback 落盘（报告审计可见）。"""
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(env, "get_llm", _boom)
-    build_graph().invoke({"tokens": ["BTC", "UNI"], "meta": {}})
-    run = json.loads((_latest() / "run.json").read_text(encoding="utf-8"))
-    for row in run["results"]:
-        assert row["decision"] == "PASS"  # json_mode 兜底（规格 ④-3）
-        assert row.get("fallback") == "json_mode"
+    for s in MOCK_TOKENS:
+        assert result["bull_evidence"][s] == []
+        assert result["bear_evidence"][s] == []
+    assert len(result["bull_errors"]) == len(MOCK_TOKENS)
+    assert len(result["bear_errors"]) == len(MOCK_TOKENS)
+    assert next(iter(result["bull_errors"].values())).startswith("分支异常")
 
 
 # ── 4/5. 筛选器端到端（mock 部分 + 断网批终止）────────────
@@ -199,7 +186,7 @@ def test_graph_internal_failures_never_escape(monkeypatch, tmp_path):
 
 @requires_smoke
 def test_real_api_smoke_btc_uni(monkeypatch, tmp_path):
-    """验收 2：真实 API 全链 BTC/UNI（含 search_web 实测，六维查询模板出结果）。"""
+    """验收 2（03 票改造）：真实 API 全链 BTC/UNI（证据分支拓扑）。"""
     monkeypatch.setenv("SR_MOCK", "0")
     monkeypatch.chdir(tmp_path)
     result = build_graph().invoke({"tokens": ["BTC", "UNI"], "meta": {}})
@@ -207,7 +194,9 @@ def test_real_api_smoke_btc_uni(monkeypatch, tmp_path):
     assert meta["report_path"]
     run = json.loads((Path(meta["report_path"]) / "run.json").read_text(encoding="utf-8"))
     assert run["meta"]["mode"] == "live"
-    assert len(run["results"]) == 2
+    order = run["meta"]["node_order"]
+    assert order[0] == "collect_data" and order[-1] == "write_report"
+    assert {"bull_research", "bear_research", "evidence_verify"} <= set(order)
     # search_web 实测：六维查询模板（project/team/social/adoption/unlock/catalyst）出结果
     from strategy_research.tools import search_web
 

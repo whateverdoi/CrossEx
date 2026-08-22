@@ -28,15 +28,12 @@ def _points(text: str) -> int:
 # ── 注册表 ───────────────────────────────────────────────
 
 
-def test_facts_tools_registry() -> None:
-    """FACTS_TOOLS 5 个：4 历史序列 + search_web。"""
+def test_tools_registries() -> None:
+    """注册表：FACTS_TOOLS 5 个（4 历史序列 + search_web）；CHALLENGE_TOOLS 4 个无联网。"""
     names = {getattr(x, "name", "") for x in t.FACTS_TOOLS}
     assert names == _TOOL_NAMES
     assert len(t.FACTS_TOOLS) == 5
 
-
-def test_challenge_tools_registry() -> None:
-    """CHALLENGE_TOOLS 4 个，不含 search_web（对抗者不给联网搜索）。"""
     names = {getattr(x, "name", "") for x in t.CHALLENGE_TOOLS}
     assert names == _TOOL_NAMES - {"search_web"}
     assert len(t.CHALLENGE_TOOLS) == 4
@@ -45,22 +42,19 @@ def test_challenge_tools_registry() -> None:
 # ── get_tvl_history ──────────────────────────────────────
 
 
-def test_tvl_history_mock_success() -> None:
-    """mock 成功：序列 + 降采样 ≤10 点。"""
+def test_tvl_history() -> None:
+    """mock 成功：序列 + 降采样 ≤10 点；链类 token 无协议 TVL 历史（提示而非数据）。"""
     text = t.get_tvl_history.invoke({"symbol": "UNI"})
     assert text.startswith("TVL 历史")
     assert _points(text) <= 10
     assert "1007" in text  # uniswap len=7 → 最新 tvl=1007.00
 
-
-def test_tvl_history_chain_no_data() -> None:
-    """链类 token：无协议 TVL 历史（返回提示而非数据）。"""
-    text = t.get_tvl_history.invoke({"symbol": "BTC"})
-    assert "链类代币无协议 TVL 历史序列" in text
+    chain_text = t.get_tvl_history.invoke({"symbol": "BTC"})
+    assert "链类代币无协议 TVL 历史序列" in chain_text
 
 
-def test_tvl_history_failure_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    """失败态：数据源异常 → 错误文本，不抛异常。"""
+def test_tvl_history_failure_modes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """失败态与无结果态：异常 → 错误文本；空序列 → 无历史数据，均不抛异常。"""
 
     def boom(_protocol: str, client=None):
         raise RuntimeError("network down")
@@ -68,9 +62,6 @@ def test_tvl_history_failure_never_raises(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(defillama, "fetch_protocol_tvl_history", boom)
     assert "数据不可用（UNKNOWN）" in t.get_tvl_history.invoke({"symbol": "UNI"})
 
-
-def test_tvl_history_empty_no_data(monkeypatch: pytest.MonkeyPatch) -> None:
-    """无结果态：空序列 → "无历史数据"。"""
     monkeypatch.setattr(
         defillama, "fetch_protocol_tvl_history", lambda _p, client=None: None
     )
@@ -91,59 +82,44 @@ def test_fees_history_mock_success() -> None:
 # ── get_funding_history ──────────────────────────────────
 
 
-def test_funding_history_mock_success() -> None:
-    """mock 成功：费率 6 位小数（0.0001 不丢失精度）。"""
+def test_funding_history(monkeypatch: pytest.MonkeyPatch) -> None:
+    """mock 成功：费率 6 位小数（0.0001 不丢失精度）；无合约态 → 无数据提示。"""
     text = t.get_funding_history.invoke({"symbol": "BTC"})
     assert "资金费率历史" in text
     assert _points(text) <= 10
     assert "0.000" in text
 
-
-def test_funding_history_no_contract(monkeypatch: pytest.MonkeyPatch) -> None:
-    """无合约态：数据源返回 None → 无数据提示。"""
     monkeypatch.setattr(
         binance_futures, "fetch_funding_rate_history", lambda *a, **k: None
     )
-    text = t.get_funding_history.invoke({"symbol": "BTC"})
-    assert "无资金费率数据" in text
+    assert "无资金费率数据" in t.get_funding_history.invoke({"symbol": "BTC"})
 
 
 # ── get_stablecoin_history ───────────────────────────────
 
 
-def test_stablecoin_history_mock_success() -> None:
-    """mock 成功：链名或 symbol 均可解析。"""
+def test_stablecoin_history() -> None:
+    """mock 成功：链名或 symbol 均可解析；协议类 token（非链）一致地返回无数据。"""
     text = t.get_stablecoin_history.invoke({"symbol": "ETH"})
     assert "稳定币总量历史" in text
     assert _points(text) <= 10
 
-
-def test_stablecoin_history_protocol_token_no_data() -> None:
-    """协议类 token（非链）：mock/真实一致地返回无数据（不模拟不存在的数据）。"""
-    text = t.get_stablecoin_history.invoke({"symbol": "UNI"})
-    assert "无稳定币数据" in text
+    assert "无稳定币数据" in t.get_stablecoin_history.invoke({"symbol": "UNI"})
 
 
 # ── search_web ───────────────────────────────────────────
 
 
-def test_search_web_mock() -> None:
-    """mock 分支：带（mock 数据）标识。"""
+def test_search_web(monkeypatch: pytest.MonkeyPatch) -> None:
+    """search_web 三态：mock 带标识；真实失败 → 不可用；真实空 → 无结果。"""
     text = t.search_web.invoke({"query": "UNI unlock"})
     assert text.startswith("（mock 数据）")
     assert "UNI unlock" in text
 
-
-def test_search_web_real_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    """真实失败态：None → 搜索不可用。"""
     monkeypatch.setenv("SR_MOCK", "0")
     monkeypatch.setattr(web_ds, "search_web", lambda *a, **k: None)
     assert t.search_web.invoke({"query": "x"}) == "搜索不可用（UNKNOWN）"
 
-
-def test_search_web_real_empty(monkeypatch: pytest.MonkeyPatch) -> None:
-    """真实无结果态：[] → 无搜索结果。"""
-    monkeypatch.setenv("SR_MOCK", "0")
     monkeypatch.setattr(web_ds, "search_web", lambda *a, **k: [])
     assert t.search_web.invoke({"query": "x"}) == "无搜索结果"
 
@@ -151,9 +127,8 @@ def test_search_web_real_empty(monkeypatch: pytest.MonkeyPatch) -> None:
 # ── 工具层永不抛异常 ─────────────────────────────────────
 
 
-def test_tools_never_raise_on_garbage() -> None:
-    """垃圾输入（非字符串 / None）也不抛异常：直接调函数体（绕过 langchain
-    schema 校验——校验属调用方行为，工具内部保证是契约）。"""
+def test_tools_never_raise(monkeypatch: pytest.MonkeyPatch) -> None:
+    """工具层永不抛异常：垃圾输入与数据源异常均产出非空文本。"""
     for fn in t.FACTS_TOOLS:
         for arg in (123, None, "", [], {}):
             try:
@@ -161,10 +136,6 @@ def test_tools_never_raise_on_garbage() -> None:
             except Exception as exc:  # pragma: no cover - 契约违反即测试失败
                 pytest.fail(f"{fn.name}({arg!r}) 抛异常: {exc}")
             assert isinstance(text, str) and text
-
-
-def test_tools_never_raise_on_data_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    """数据源抛任意异常 → 错误文本（工具层永不抛异常）。"""
 
     def boom(*_a, **_k):
         raise RuntimeError("boom")

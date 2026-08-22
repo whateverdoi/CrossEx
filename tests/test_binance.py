@@ -30,31 +30,24 @@ class OneOf(BaseModel):
     actual_instance: BaseModel | None = None
 
 
-def test_to_plain_unpacks_basemodel_with_to_dict() -> None:
-    plain = sdk.to_plain(Response(symbol="BTCUSDT", nested=Nested(value=7)))
-    assert plain == {"symbol": "BTCUSDT", "nested": {"value": 7}}
-
-
-def test_to_plain_unwraps_actual_instance() -> None:
-    plain = sdk.to_plain(
+def test_to_plain_variants() -> None:
+    """解包三分支：BaseModel 递归 to_dict / OneOf 剥 actual_instance / 空 additional_properties 丢弃。"""
+    assert sdk.to_plain(Response(symbol="BTCUSDT", nested=Nested(value=7))) == {
+        "symbol": "BTCUSDT",
+        "nested": {"value": 7},
+    }
+    assert sdk.to_plain(
         OneOf(actual_instance=Response(symbol="ETHUSDT", nested=Nested(value=1)))
+    ) == {"symbol": "ETHUSDT", "nested": {"value": 1}}
+    assert "additional_properties" not in sdk.to_plain(
+        {"symbol": "X", "additional_properties": {}}
     )
-    assert plain == {"symbol": "ETHUSDT", "nested": {"value": 1}}
-
-
-def test_to_plain_drops_empty_additional_properties() -> None:
-    plain = sdk.to_plain({"symbol": "X", "additional_properties": {}})
-    assert "additional_properties" not in plain
-
-
-def test_to_plain_keeps_nonempty_additional_properties() -> None:
-    plain = sdk.to_plain({"symbol": "X", "additional_properties": {"a": 1}})
-    assert plain["additional_properties"] == {"a": 1}
-
-
-def test_to_plain_recurses_nested_containers() -> None:
-    plain = sdk.to_plain([{"list": [Response(symbol="A", nested=Nested(value=2))]}])
-    assert plain == [{"list": [{"symbol": "A", "nested": {"value": 2}}]}]
+    assert sdk.to_plain({"symbol": "X", "additional_properties": {"a": 1}})[
+        "additional_properties"
+    ] == {"a": 1}
+    assert sdk.to_plain([{"list": [Response(symbol="A", nested=Nested(value=2))]}]) == [
+        {"list": [{"symbol": "A", "nested": {"value": 2}}]}
+    ]
 
 
 # ── 429/418 桥接与退避 ──────────────────────────────────────
@@ -69,13 +62,11 @@ def _rate_limited_fn(status: int):
     return fn
 
 
-def test_sdk_call_bridges_429() -> None:
+def test_sdk_call_bridges_rate_limits() -> None:
+    """429/418 → RateLimitedError（status 透传）。"""
     with pytest.raises(sdk.RateLimitedError) as exc:
         sdk.sdk_call(_rate_limited_fn(429))
     assert exc.value.status == 429
-
-
-def test_sdk_call_bridges_418() -> None:
     with pytest.raises(sdk.RateLimitedError) as exc:
         sdk.sdk_call(_rate_limited_fn(418))
     assert exc.value.status == 418
@@ -90,20 +81,15 @@ def test_sdk_call_returns_plain_dict() -> None:
     assert result == {"symbol": "BTCUSDT", "nested": {"value": 3}}
 
 
-def test_retry_after_from_headers() -> None:
+def test_backoff_strategy() -> None:
+    """Retry-After 头读取 + 退避计算：优先 retry_after+10s；无则按状态/次数递进。"""
+
     class FakeExc:
         headers: ClassVar[dict[str, str]] = {"Retry-After": "30"}
 
     assert sdk._retry_after_from(FakeExc()) == 30.0
     assert sdk._retry_after_from(Exception()) is None
-
-
-def test_backoff_seconds_prefers_retry_after() -> None:
-    exc = sdk.RateLimitedError(429, retry_after=5.0)
-    assert sdk._backoff_seconds(exc, 0) == 15.0  # +10s 缓冲
-
-
-def test_backoff_seconds_fallbacks() -> None:
+    assert sdk._backoff_seconds(sdk.RateLimitedError(429, retry_after=5.0), 0) == 15.0
     assert sdk._backoff_seconds(sdk.RateLimitedError(429, None), 0) == 60
     assert sdk._backoff_seconds(sdk.RateLimitedError(418, None), 0) == 120
     assert sdk._backoff_seconds(sdk.RateLimitedError(418, None), 3) == 600
@@ -112,17 +98,15 @@ def test_backoff_seconds_fallbacks() -> None:
 # ── WeightBudget 权重记账 ────────────────────────────────────
 
 
-def test_weight_budget_tracks_usage() -> None:
+def test_weight_budget() -> None:
+    """权重记账：acquire 累加；仅过期事件（>60s）→ 0。"""
     budget = sdk.WeightBudget(limit=100)
     budget.acquire_sync(5)
     budget.acquire_sync(10)
     assert budget.used() == 15
-
-
-def test_weight_budget_expires_old_events() -> None:
-    budget = sdk.WeightBudget(limit=100)
-    budget._events.append((time.monotonic() - 61.0, 80))
-    assert budget.used() == 0
+    budget2 = sdk.WeightBudget(limit=100)
+    budget2._events.append((time.monotonic() - 61.0, 80))
+    assert budget2.used() == 0
 
 
 def test_sync_call_with_rate_limit_succeeds() -> None:
@@ -134,8 +118,8 @@ def test_sync_call_with_rate_limit_succeeds() -> None:
     assert budget.used() == 1
 
 
-def test_sync_call_with_rate_limit_gives_up(monkeypatch: pytest.MonkeyPatch) -> None:
-    """重试耗尽仍失败 → RuntimeError，不吞异常。"""
+def test_sync_call_with_rate_limit_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+    """重试耗尽仍失败 → RuntimeError；418 且退避超上限（默认 600s）→ 立即中止。"""
 
     def boom(*args, **kwargs):
         raise TooManyRequestsError(status_code=429)
@@ -146,19 +130,13 @@ def test_sync_call_with_rate_limit_gives_up(monkeypatch: pytest.MonkeyPatch) -> 
             boom, name="test", attempts=2, weight=1, budget=sdk.WeightBudget(limit=100)
         )
 
-
-def test_sync_call_with_rate_limit_aborts_on_long_ban(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """418 且退避超上限（默认 600s）→ 立即中止，不傻等。"""
-
-    def fn(*args, **kwargs):
+    def ban(*args, **kwargs):
         raise RateLimitBanError(status_code=418)
 
     monkeypatch.setattr(sdk, "_backoff_seconds", lambda exc, n: 999999.0)
     with pytest.raises(RuntimeError, match="封禁"):
         sdk.sync_call_with_rate_limit(
-            fn, name="test", attempts=2, weight=1, budget=sdk.WeightBudget(limit=100)
+            ban, name="test", attempts=2, weight=1, budget=sdk.WeightBudget(limit=100)
         )
 
 
@@ -268,48 +246,48 @@ _STD_KLINES = _kline_rows({-10: 90, -2: 95, -1: 100, 0: 110, 3: 120, 6: 130, 10:
 
 
 class TestPairSymbol:
-    def test_bare_symbol_gets_usdt(self):
+    def test_pair_symbol(self):
+        """裸符号补 USDT；带计价后缀原样。"""
         assert binance_ds.pair_symbol("BTC") == "BTCUSDT"
         assert binance_ds.pair_symbol("1000PEPE") == "1000PEPEUSDT"
-
-    def test_quote_suffixed_unchanged(self):
         for q in binance_ds.QUOTES:
             assert binance_ds.pair_symbol(f"BTC{q}") == f"BTC{q}"
 
 
 class TestTrailingReturn:
-    def test_basic(self):
-        """最新收盘 vs N 日前收盘（live 口径：含未收盘 bar）。"""
+    def test_trailing_return(self):
+        """最新收盘 vs N 日前收盘（live 口径：含未收盘 bar）；窗口不足/坏值 → None。"""
         rows = _kline_rows({-3: 90, -2: 95, -1: 100, 0: 110})
         assert binance_ds.trailing_return(rows, 1) == pytest.approx(10.0)
         assert binance_ds.trailing_return(rows, 2) == pytest.approx(110 / 95 * 100 - 100)
-
-    def test_insufficient_window_none(self):
         assert binance_ds.trailing_return(_kline_rows({0: 100}), 1) is None
         assert binance_ds.trailing_return(None, 1) is None
-
-    def test_bad_close_none(self):
-        rows = [{"open_time": 1, "close_price": None}, {"open_time": 2, "close_price": 100}]
-        assert binance_ds.trailing_return(rows, 1) is None
+        bad = [
+            {"open_time": 1, "close_price": None},
+            {"open_time": 2, "close_price": 100},
+        ]
+        assert binance_ds.trailing_return(bad, 1) is None
 
 
 class TestClosedDailyReturns:
-    def test_basic_positioning_no_lookahead(self):
-        """base = 决策时最近已收盘日线（D-1），非决策日当根（无前视）。"""
+    def test_positioning_and_windows(self):
+        """base = 决策时最近已收盘日线（D-1，无前视）；窗口不足/缺口 → None 不误用相邻日。"""
         out = binance_ds.closed_daily_returns(_STD_KLINES, _RUN_TS_MS)
         assert out["base_price"] == 100
         assert out["ret_1d"] == 10.0  # 110/100
         assert out["ret_7d"] == 30.0  # 130/100
-
-    def test_insufficient_window_returns_none(self):
-        out = binance_ds.closed_daily_returns(
+        out2 = binance_ds.closed_daily_returns(
             _kline_rows({-1: 100, 0: 110, 3: 120}), _RUN_TS_MS
         )
-        assert out["ret_1d"] == 10.0
-        assert out["ret_7d"] is None  # D+6 无数据
-
-    def test_before_window_empty(self):
-        assert binance_ds.closed_daily_returns(_kline_rows({1: 110, 2: 120}), _RUN_TS_MS) == {}
+        assert out2["ret_1d"] == 10.0
+        assert out2["ret_7d"] is None  # D+6 无数据
+        assert binance_ds.closed_daily_returns(
+            _kline_rows({1: 110, 2: 120}), _RUN_TS_MS
+        ) == {}
+        out3 = binance_ds.closed_daily_returns(
+            _kline_rows({-1: 100, 0: 110, 3: 120, 7: 140}), _RUN_TS_MS
+        )
+        assert out3["ret_7d"] is None  # D+6 缺失 → None（不误用 D+7）
 
     def test_tolerates_disorder_and_bad_rows(self):
         """乱序 + 坏行（缺字段）不干扰定位（mock 降序防御）。"""
@@ -322,17 +300,8 @@ class TestClosedDailyReturns:
         assert out["base_price"] == 100
         assert out["ret_7d"] == 30.0
 
-    def test_gap_day_is_none_not_adjacent(self):
-        """D+6 缺失 → ret_7d None（不误用相邻日 D+3）。"""
-        out = binance_ds.closed_daily_returns(
-            _kline_rows({-1: 100, 0: 110, 3: 120, 7: 140}), _RUN_TS_MS
-        )
-        assert out["ret_7d"] is None
-
-    def test_empty_inputs(self):
+    def test_empty_inputs_and_custom_days(self):
         assert binance_ds.closed_daily_returns(None, _RUN_TS_MS) == {}
         assert binance_ds.closed_daily_returns([], _RUN_TS_MS) == {}
-
-    def test_custom_days_keys(self):
         out = binance_ds.closed_daily_returns(_STD_KLINES, _RUN_TS_MS, days=(7,))
         assert set(out) == {"base_price", "ret_7d"}

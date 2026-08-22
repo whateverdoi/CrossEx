@@ -34,7 +34,8 @@ def _row(symbol: str, change=None, vol=None, days=None) -> dict:
 # ── Filter 注册表 ──────────────────────────────────────────
 
 
-def test_filter_listing_days_lt_keeps_recent_only():
+def test_filters_floor_rules():
+    """保守下限过滤：listing_days<max 保留次新；quote_volume≥下限保留；缺失排除。"""
     from strategy_research.screener import FILTERS
 
     rows = [
@@ -45,10 +46,6 @@ def test_filter_listing_days_lt_keeps_recent_only():
     ]  # listing_days 缺失（UNKNOWN 保守排除）
     out = FILTERS["listing_days_lt"]({"max_days": 100}).apply(rows)
     assert [r["symbol"] for r in out] == ["A", "B"]
-
-
-def test_filter_min_quote_volume_keeps_above_floor():
-    from strategy_research.screener import FILTERS
 
     rows = [
         _row("A", vol=1e8),
@@ -61,6 +58,7 @@ def test_filter_min_quote_volume_keeps_above_floor():
 
 
 def test_filter_exclude_stablecoins():
+    """稳定币排除：USDT/FDUSD/TUSD/FRAX/USDD 计价对剔除；base 稳定币+quote 非稳定币保留。"""
     from strategy_research.screener import FILTERS
 
     rows = [
@@ -74,54 +72,38 @@ def test_filter_exclude_stablecoins():
     ]
     out = FILTERS["exclude_stablecoins"]({}).apply(rows)
     assert [r["symbol"] for r in out] == ["BTCUSDT", "BTCFDUSD"]
-
-
-def test_stablecoin_pair_boundaries():
-    """边界：稳定币 base + 非稳定币 quote 保留；单段 symbol 不崩。"""
-    from strategy_research.screener import FILTERS
-
-    rows = [_row("USDCBTC"), _row("USDT"), _row("BTC")]
-    out = FILTERS["exclude_stablecoins"]({}).apply(rows)
-    assert [r["symbol"] for r in out] == ["USDCBTC", "USDT", "BTC"]
+    # 边界：稳定币 base + 非稳定币 quote 保留；单段 symbol 不崩
+    boundary = [_row("USDCBTC"), _row("USDT"), _row("BTC")]
+    out2 = FILTERS["exclude_stablecoins"]({}).apply(boundary)
+    assert [r["symbol"] for r in out2] == ["USDCBTC", "USDT", "BTC"]
 
 
 # ── Rank 注册表 ────────────────────────────────────────────
 
 
-def test_rank_volatility_24h_sorts_by_abs_change_desc():
+def test_ranks_direction_sorts():
+    """排序方向：volatility 按 |change| 降序 / gain 降序 / loss 升序 / volume 降序；
+    abs=False 保符号；缺失与 UNKNOWN 字符串保守排最后。"""
     from strategy_research.screener import RANKERS
 
     rows = [_row("A", change=2.0), _row("B", change=-5.0), _row("C", change=0.5)]
-    out = RANKERS["volatility_24h"]({}).apply(rows)
-    assert [r["symbol"] for r in out] == ["B", "A", "C"]
+    assert [r["symbol"] for r in RANKERS["volatility_24h"]({}).apply(rows)] == ["B", "A", "C"]
+    assert [r["symbol"] for r in RANKERS["gain_24h"]({}).apply(rows)] == ["A", "C", "B"]
+    assert [r["symbol"] for r in RANKERS["loss_24h"]({}).apply(rows)] == ["B", "C", "A"]
+    assert [r["symbol"] for r in RANKERS["volatility_24h"]({"abs": False}).apply(rows)] == ["A", "C", "B"]
+
+    vol_rows = [_row("A", vol=1e6), _row("B", vol=1e9), _row("C", vol=1e8)]
+    assert [r["symbol"] for r in RANKERS["quote_volume"]({}).apply(vol_rows)] == ["B", "C", "A"]
+
+    missing = [_row("A"), _row("B", change=5.0), _row("C", change=-3.0)]
+    assert [r["symbol"] for r in RANKERS["volatility_24h"]({}).apply(missing)] == ["B", "C", "A"]
+    # UNKNOWN 字符串指标与 None 同权：保守排最后
+    unknown = [_row("A", change=UNKNOWN), _row("B", change=5.0)]
+    assert [r["symbol"] for r in RANKERS["volatility_24h"]({}).apply(unknown)] == ["B", "A"]
 
 
-def test_rank_gain_24h_sorts_by_change_desc():
-    from strategy_research.screener import RANKERS
-
-    rows = [_row("A", change=2.0), _row("B", change=-5.0), _row("C", change=0.5)]
-    out = RANKERS["gain_24h"]({}).apply(rows)
-    assert [r["symbol"] for r in out] == ["A", "C", "B"]
-
-
-def test_rank_loss_24h_sorts_by_change_asc():
-    from strategy_research.screener import RANKERS
-
-    rows = [_row("A", change=2.0), _row("B", change=-5.0), _row("C", change=0.5)]
-    out = RANKERS["loss_24h"]({}).apply(rows)
-    assert [r["symbol"] for r in out] == ["B", "C", "A"]
-
-
-def test_rank_quote_volume_sorts_by_volume_desc():
-    from strategy_research.screener import RANKERS
-
-    rows = [_row("A", vol=1e6), _row("B", vol=1e9), _row("C", vol=1e8)]
-    out = RANKERS["quote_volume"]({}).apply(rows)
-    assert [r["symbol"] for r in out] == ["B", "C", "A"]
-
-
-def test_rank_mispricing_24h_prefers_weak_price_high_volume():
-    """错价榜：价格弱 + 成交活跃优先（pct 升序排名 + vol 降序排名等权）。"""
+def test_rank_mispricing():
+    """错价榜：价格弱+成交活跃优先；任一指标缺失 → 排最后（保守纪律）。"""
     from strategy_research.screener import RANKERS
 
     rows = [
@@ -134,11 +116,6 @@ def test_rank_mispricing_24h_prefers_weak_price_high_volume():
     # score（越小越优先）: B=0+1=1 → A=3+0=3 / C=1+2=3 → D=2+3=5
     assert [r["symbol"] for r in out] == ["B", "A", "C", "D"]
 
-
-def test_rank_mispricing_24h_missing_metric_last():
-    """任一指标缺失（含 UNKNOWN 字符串）→ 排最后（保守纪律）。"""
-    from strategy_research.screener import RANKERS
-
     rows = [
         _row("A", change=2.0, vol=5e8),
         _row("B", change=-5.0, vol=1e9),
@@ -149,32 +126,6 @@ def test_rank_mispricing_24h_missing_metric_last():
     out = RANKERS["mispricing_24h"]({}).apply(rows)
     # score: B=0+0=0 → A=1+1=2；C/D/E 缺失排最后（保序）
     assert [r["symbol"] for r in out] == ["B", "A", "C", "D", "E"]
-
-
-def test_rank_volatility_abs_false_keeps_sign():
-    """abs=False 时按原始涨跌降序（负数在前）。"""
-    from strategy_research.screener import RANKERS
-
-    rows = [_row("A", change=2.0), _row("B", change=-5.0), _row("C", change=0.5)]
-    out = RANKERS["volatility_24h"]({"abs": False}).apply(rows)
-    assert [r["symbol"] for r in out] == ["A", "C", "B"]
-
-
-def test_rank_missing_metric_goes_last():
-    from strategy_research.screener import RANKERS
-
-    rows = [_row("A"), _row("B", change=5.0), _row("C", change=-3.0)]
-    out = RANKERS["volatility_24h"]({}).apply(rows)
-    assert [r["symbol"] for r in out] == ["B", "C", "A"]
-
-
-def test_rank_unknown_string_metric_goes_last():
-    """UNKNOWN 字符串指标与 None 同权：保守排最后。"""
-    from strategy_research.screener import RANKERS
-
-    rows = [_row("A", change=UNKNOWN), _row("B", change=5.0)]
-    out = RANKERS["volatility_24h"]({}).apply(rows)
-    assert [r["symbol"] for r in out] == ["B", "A"]
 
 
 # ── select_tokens 集成（真实模式，注入 fetch） ─────────────
@@ -288,44 +239,32 @@ def test_select_tokens_whitelist_filters_noise_pairs(monkeypatch):
         assert noise not in symbols, f"白名单应排除 {noise}"
 
 
-def test_select_tokens_no_rank_rules_skips_sorting(monkeypatch):
+def test_select_tokens_edge_cases(monkeypatch):
+    """边界：无 rank 规则保序不抛；全字段缺失 → 保守空候选。"""
     _patch_fetch(monkeypatch)
     rules = [ScreenRule("filter", "listing_days_lt", {"max_days": 100})]
     result = select_tokens(rules, top_n=2)
     # 无 rank：保持 ticker 原始顺序（不抛异常，防 StopIteration）
     assert [c["symbol"] for c in result.candidates] == ["SOLUSDT", "NEWUSDT"]
 
-
-def test_select_tokens_unknown_fields_conservative(monkeypatch):
     monkeypatch.setenv("SR_MOCK", "0")
     monkeypatch.setattr(
         binance, "fetch_ticker_24h_all", lambda: [{"symbol": "NOINFOUSDT"}]
     )  # 全字段缺失
     monkeypatch.setattr(binance_futures, "fetch_listing_days", dict)
-    result = select_tokens(DEFAULT_RULES, top_n=10)
-    assert result.candidates == []  # UNKNOWN 保守排除，无候选但不抛
+    result2 = select_tokens(DEFAULT_RULES, top_n=10)
+    assert result2.candidates == []  # UNKNOWN 保守排除，无候选但不抛
 
 
-def test_select_tokens_unknown_filter_rule_raises(monkeypatch):
+def test_select_tokens_invalid_rules(monkeypatch):
+    """非法规则即失败：未知筛选/未知排序/未知类别/多 rank 全部 ScreeningError。"""
     _patch_fetch(monkeypatch)
     with pytest.raises(ScreeningError, match="未知筛选规则"):
         select_tokens([ScreenRule("filter", "no_such_filter")])
-
-
-def test_select_tokens_unknown_rank_rule_raises(monkeypatch):
-    _patch_fetch(monkeypatch)
     with pytest.raises(ScreeningError, match="未知排序规则"):
         select_tokens([ScreenRule("rank", "no_such_rank")])
-
-
-def test_select_tokens_unknown_rule_kind_raises(monkeypatch):
-    _patch_fetch(monkeypatch)
     with pytest.raises(ScreeningError, match="未知规则类别"):
         select_tokens([ScreenRule("fliter", "listing_days_lt")])
-
-
-def test_select_tokens_multiple_rank_rules_raises(monkeypatch):
-    _patch_fetch(monkeypatch)
     with pytest.raises(ScreeningError, match="单一 rank"):
         select_tokens(
             [
@@ -362,13 +301,12 @@ def test_select_tokens_mock_mode_fixed_candidates_no_io(monkeypatch):
 # ── main 模式互斥 ──────────────────────────────────────────
 
 
-def test_main_manual_tokens_skip_screening():
+def test_main_manual_tokens_skip_screening(monkeypatch):
+    """手动模式：--tokens 参数与 SR_TOKENS 环境变量等价（均跳过筛选）。"""
     tokens, screening = _resolve_tokens(parse_args(["--tokens", "btc, ETH"]))
     assert tokens == ["BTC", "ETH"]
     assert screening == {"mode": "manual"}
 
-
-def test_main_manual_tokens_via_env(monkeypatch):
     monkeypatch.setenv("SR_TOKENS", "SOL,XRP")
     tokens, screening = _resolve_tokens(parse_args([]))
     assert tokens == ["SOL", "XRP"]

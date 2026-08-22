@@ -13,11 +13,13 @@ from typing import Any
 from langchain.agents import create_agent
 
 from strategy_research import context, env
+from strategy_research import evidence as ev_mod
 from strategy_research import review as review_mod
 from strategy_research import scanner_snapshot as scan_mod
 from strategy_research import signals as sig_mod
 from strategy_research.datasources import binance, binance_futures, defillama, mock
 from strategy_research.datasources import web as web_ds
+from strategy_research.evidence import EvidenceItem
 from strategy_research.schemas import (
     ChallengeItem,
     FactItem,
@@ -201,7 +203,17 @@ def _fund(symbol: str, shared: dict) -> dict:
             )
             fund["stablecoin_supply"] = _dp(None, "defillama")
             fund["dex_volume_24h"] = _dp(None, "defillama")
-        else:  # chain：稳定币/DEX 聚合字段
+            # 趋势特征（01 票）：确定性历史序列 → 纯函数提炼，两分支直读数值
+            tvl_hist = defillama.fetch_protocol_tvl_history(slug)
+            fund["tvl_trend_30d"] = _dp(
+                sig_mod.series_trend(tvl_hist, "tvl", 30), "defillama"
+            )
+            fees_hist = defillama.fetch_protocol_fees_history(slug)
+            fund["fees_trend_30d"] = _dp(
+                sig_mod.series_trend(fees_hist, "fees", 30), "defillama"
+            )
+            fund["stablecoin_change_30d"] = _dp(None, "defillama")
+        else:  # chain：稳定币/DEX 聚合字段 + 稳定币趋势特征
             chain = slug[6:]
             fund["fees_24h"] = _dp(None, "defillama")
             fund["fees_7d"] = _dp(None, "defillama")
@@ -211,6 +223,12 @@ def _fund(symbol: str, shared: dict) -> dict:
                 (shared["stablecoins"] or {}).get(chain), "defillama"
             )
             fund["dex_volume_24h"] = _dp((shared["dexs"] or {}).get(chain), "defillama")
+            fund["tvl_trend_30d"] = _dp(None, "defillama")
+            fund["fees_trend_30d"] = _dp(None, "defillama")
+            sc_hist = defillama.fetch_stablecoin_history(chain)
+            fund["stablecoin_change_30d"] = _dp(
+                sig_mod.series_change(sc_hist, "supply", 30), "defillama"
+            )
     else:
         for key in _FUND_KEYS:
             fund[key] = _dp(None, "defillama")
@@ -220,6 +238,9 @@ def _fund(symbol: str, shared: dict) -> dict:
         fund["revenue_7d"] = _dp(None, "defillama")
         fund["stablecoin_supply"] = _dp(None, "defillama")
         fund["dex_volume_24h"] = _dp(None, "defillama")
+        fund["tvl_trend_30d"] = _dp(None, "defillama")
+        fund["fees_trend_30d"] = _dp(None, "defillama")
+        fund["stablecoin_change_30d"] = _dp(None, "defillama")
     fund["incomplete"] = _fund_incomplete(fund)
     return fund
 
@@ -374,6 +395,9 @@ def _error_snapshots(
         "revenue_7d",
         "stablecoin_supply",
         "dex_volume_24h",
+        "tvl_trend_30d",
+        "fees_trend_30d",
+        "stablecoin_change_30d",
     ):
         fund[key] = _dp(None, "defillama")
     mkt: dict[str, Any] = {"error": msg, "futures_error": None, "incomplete": True}
@@ -585,6 +609,89 @@ def research_facts(state: dict) -> dict:
         "facts": {s: _collect_facts(s, state) for s in state["tokens"]},
         "meta": meta,
     }
+
+
+def _invoke_branch(symbol: str, state: dict, side: str) -> tuple[list[dict], str | None]:
+    """分支单 token 证据提取（02 票）：json_mode 单次调用 + 宽容解析。
+
+    坏条目（claim/source 空）丢弃在装配层；上限 8 条截断（BranchOutput 契约）；
+    异常 → ([], 错误消息)，批不中断。返回 (items, error)。
+    """
+    prompt = context.BULL_PROMPT if side == "bull" else context.BEAR_PROMPT
+    items: list[dict] = []
+    try:
+        summary = context.build_branch_summary(symbol, state)
+        out = (
+            env.get_llm(json_mode=True)
+            .with_retry(stop_after_attempt=2)
+            .invoke(
+                [("system", prompt), ("human", summary)],
+                config={"callbacks": [env.live_call_counter(side)]},
+            )
+        )
+        obj = _extract_json(getattr(out, "content", out))
+        for x in (obj or {}).get("evidence") or []:
+            try:
+                item = EvidenceItem.model_validate(x).model_dump()
+                if item["claim"] and item["source"]:
+                    items.append(item)
+            except Exception:  # noqa: S112 —— 坏条目丢弃（02 票）
+                continue
+        return items[:8], None
+    except Exception as exc:
+        return [], f"分支异常: {exc}"
+
+
+def _branch(state: dict, side: str, key: str) -> dict:
+    """分支节点模板（bull/bear 共用，02 票）：每 token 独立证据提取，批不中断。
+
+    只写本分支独占字段（{side}_evidence / {side}_errors）——两分支并行时
+    写共享键（meta 等）会触发 LangGraph 并行写冲突（spec D1）；node_order
+    由串行的 evidence_verify 统一记录。
+    """
+    errors: dict[str, str] = {}
+    items: dict[str, list[dict]] = {}
+    for s in state["tokens"]:
+        got, err = _invoke_branch(s, state, side)
+        items[s] = got
+        if err:
+            errors[s] = err
+    out: dict[str, Any] = {f"{side}_evidence": items}
+    if errors:
+        out[f"{side}_errors"] = errors
+    return out
+
+
+def bull_research(state: dict) -> dict:
+    """多头证据研究员（02 票）：单 token 结构化证据（≤8 条）。
+
+    不接线——旧图照常，03 票拓扑切换后生效。
+    """
+    return _branch(state, "bull", "bull_research")
+
+
+def bear_research(state: dict) -> dict:
+    """空头证据研究员（02 票）：单 token 结构化证据（≤8 条）。
+
+    不接线——旧图照常，03 票拓扑切换后生效。
+    """
+    return _branch(state, "bear", "bear_research")
+
+
+def evidence_verify(state: dict) -> dict:
+    """证据核验（03 票，确定性）：两分支产出合并核验 → evidence + rejected_evidence。
+
+    纯函数无 IO（evidence.verify_evidence）：basis 逐级解引用存在且值一致 →
+    通过；否则剔除留痕。取代旧 risk_check 的机器强制位置（spec D8）。
+    串行节点补记分支 node_order（并行分支不写共享 meta，顺序即图定义顺序）。
+    """
+    meta, order = _meta(state)
+    order += ["bull_research", "bear_research", "evidence_verify"]
+    meta["node_order"] = order
+    verified, rejected = ev_mod.verify_evidence(
+        state.get("bull_evidence"), state.get("bear_evidence"), state
+    )
+    return {"evidence": verified, "rejected_evidence": rejected, "meta": meta}
 
 
 def _invoke_analysis(symbol: str, state: dict) -> dict:
@@ -822,7 +929,7 @@ def risk_check(state: dict) -> dict:
 
 
 def write_report(state: dict) -> dict:
-    """⑧ 报告落盘：overview.md + run.json + candidates.json + snapshot/diff（09-10 票）。"""
+    """⑧ 报告落盘：evidence.md + run.json + candidates.json + snapshot/diff（04 票）。"""
     from strategy_research.report import build_report
 
     meta, order = _meta(state)

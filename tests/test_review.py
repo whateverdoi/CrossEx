@@ -289,7 +289,7 @@ def _minimal_state() -> dict:
     }
 
 
-def test_build_report_includes_review_in_run_and_overview(
+def test_build_report_includes_review_in_run_and_evidence(
     tmp_path, monkeypatch
 ):
     monkeypatch.chdir(tmp_path)
@@ -313,10 +313,11 @@ def test_build_report_includes_review_in_run_and_overview(
 
     run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
     assert run["decision_review"]["stats"]["hit_rate"] == 1.0
-    md = (run_dir / "overview.md").read_text(encoding="utf-8")
-    assert "## 决策复盘" in md
-    assert "命中率 1.0" in md
-    assert "REUSDT" in md
+    # 04 票：决策复盘节随 overview.md 退役，回看数据走 run.json（evidence.md 只含证据）
+    md = (run_dir / "evidence.md").read_text(encoding="utf-8")
+    assert "## 决策复盘" not in md
+    assert "## REUSDT" in md
+    assert "（无做多证据）" in md
 
 
 def test_build_report_review_empty_placeholder(tmp_path, monkeypatch):
@@ -325,9 +326,9 @@ def test_build_report_review_empty_placeholder(tmp_path, monkeypatch):
         report_mod.review_mod, "review_past_decisions", lambda: {"records": []}
     )
     run_dir, _ = report_mod.build_report(_minimal_state(), {})
-    md = (run_dir / "overview.md").read_text(encoding="utf-8")
-    assert "## 决策复盘" in md
-    assert "无到期决策可回看" in md
+    md = (run_dir / "evidence.md").read_text(encoding="utf-8")
+    assert "## 总览" in md
+    assert "（本批无剔除记录）" in md
     run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
     assert run["decision_review"]["records"] == []
 
@@ -347,8 +348,8 @@ def test_build_report_review_exception_recorded_not_fatal(
     assert "klines 全挂" in meta["review_error"]
     run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
     assert "decision_review" not in run  # 失败不写节点
-    md = (run_dir / "overview.md").read_text(encoding="utf-8")
-    assert "## 决策复盘" in md  # 空节占位，报告仍生成
+    md = (run_dir / "evidence.md").read_text(encoding="utf-8")
+    assert "## 总览" in md  # 报告仍生成（决策复盘失败不影响证据文档）
 
 
 # ── 校准基线渲染（13 票：prompt 侧消费同一 calibrate seam） ──
@@ -363,10 +364,8 @@ class TestCalibrationContext:
             {"hit_7d": True, "decision": "TRADE", "confidence": 0.9},
         ]
 
-    def test_empty_pool_renders_empty(self):
-        assert review.render_calibration_context([]) == ""
-
     def test_render_contains_stats(self):
+        assert review.render_calibration_context([]) == ""  # 空池 → 空串
         text = review.render_calibration_context(self._records())
         assert "累积方向判断 3 条" in text  # n=3（UNAVAILABLE 不计）
         assert "命中率" in text
@@ -380,8 +379,7 @@ class TestCalibrationContext:
             '{"reviewed": ["x"], "records": [{"hit_7d": true}]}', encoding="utf-8"
         )
         assert review.load_records(tmp_path) == [{"hit_7d": True}]
-
-    def test_load_records_corrupt_falls_back_empty(self, tmp_path):
+        # 损坏日志 → 回退空
         (tmp_path / "review_log.json").write_text("not json", encoding="utf-8")
         assert review.load_records(tmp_path) == []
 
@@ -403,7 +401,7 @@ class TestCalibrateBySignal:
             },
         }
 
-    def test_buckets_by_quadrant_and_momentum(self):
+    def test_buckets_by_signal(self):
         stats = review.calibrate(
             [
                 self._rec(True, "III", 5.0),
@@ -418,20 +416,19 @@ class TestCalibrateBySignal:
         mom = {b["value"]: b for b in stats["by_signal"]["momentum"]}
         assert mom["positive"]["n"] == 3 and mom["positive"]["hit_rate"] == 1.0
         assert mom["negative"]["n"] == 1
-
-    def test_pctile_bins_and_oi_labels(self):
-        stats = review.calibrate(
+        # 分位桶 + OI 标签桶
+        stats2 = review.calibrate(
             [
                 self._rec(True, pct=90.0, oi="confirm_long"),
                 self._rec(False, pct=10.0, oi="weak_short"),
                 self._rec(True, pct=50.0, oi="confirm_long"),
             ]
         )
-        pct = {b["value"]: b for b in stats["by_signal"]["funding_pctile"]}
+        pct = {b["value"]: b for b in stats2["by_signal"]["funding_pctile"]}
         assert pct["extreme(≥80)"]["n"] == 1 and pct["extreme(≥80)"]["hit_rate"] == 1.0
         assert pct["mild(≤20)"]["n"] == 1
         assert pct["mid(21-79)"]["n"] == 1
-        oi = {b["value"]: b for b in stats["by_signal"]["oi_divergence"]}
+        oi = {b["value"]: b for b in stats2["by_signal"]["oi_divergence"]}
         assert oi["confirm_long"]["n"] == 2 and oi["confirm_long"]["hit_rate"] == 1.0
         assert oi["weak_short"]["n"] == 1
 

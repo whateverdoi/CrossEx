@@ -115,17 +115,14 @@ def _ms(**over: object) -> dict:
 # ── valuation_ratios ───────────────────────────────────────
 
 
-def test_valuation_ratios_normal() -> None:
-    """protocol 全字段：四个比率（年化口径）正确。"""
+def test_valuation_ratios() -> None:
+    """正常 / 缺失 / 异常三分支：protocol 四比率（年化口径）；缺失绝不猜测；除零→None。"""
     v = sig.valuation_ratios(_fund(), _mkt())["value"]
     assert v["mc_fees"] == pytest.approx(500.0 / (10.0 * 365.0))
     assert v["fdv_revenue"] == pytest.approx(800.0 / (5.0 * 365.0))
     assert v["mc_tvl"] == pytest.approx(500.0 / 1005.0)
     assert v["fees_tvl"] == pytest.approx((10.0 * 365.0) / 1005.0)
-
-
-def test_valuation_ratios_missing() -> None:
-    """输入缺失 / chain 类无 mcap/fdv/fees → 全 None，绝不猜测。"""
+    # 缺失：输入缺失 / chain 类无 mcap/fdv/fees → 全 None
     assert sig.valuation_ratios(None, None)["value"] == {
         "mc_fees": None,
         "fdv_revenue": None,
@@ -139,43 +136,31 @@ def test_valuation_ratios_missing() -> None:
         fees_24h=_dp(None),
         revenue_24h=_dp(None),
     )
-    v = sig.valuation_ratios(chain, _mkt())["value"]
-    assert all(x is None for x in v.values())
-
-
-def test_valuation_ratios_abnormal() -> None:
-    """除零 / 非数值字段 → 对应比率 None（UNKNOWN 纪律）。"""
-    v = sig.valuation_ratios(_fund(fees_24h=_dp(0.0)), _mkt())["value"]
-    assert v["mc_fees"] is None  # 除零
-    assert v["fees_tvl"] == 0.0  # 零费用协议 → 0.0 而非 None
-    v2 = sig.valuation_ratios(_fund(mcap=_dp("n/a")), _mkt())["value"]
-    assert v2["mc_fees"] is None and v2["mc_tvl"] is None
+    assert all(x is None for x in sig.valuation_ratios(chain, _mkt())["value"].values())
+    # 异常：除零 / 非数值字段 → 对应比率 None（UNKNOWN 纪律）
+    v2 = sig.valuation_ratios(_fund(fees_24h=_dp(0.0)), _mkt())["value"]
+    assert v2["mc_fees"] is None  # 除零
+    assert v2["fees_tvl"] == 0.0  # 零费用协议 → 0.0 而非 None
+    v3 = sig.valuation_ratios(_fund(mcap=_dp("n/a")), _mkt())["value"]
+    assert v3["mc_fees"] is None and v3["mc_tvl"] is None
 
 
 # ── momentum_score ─────────────────────────────────────────
 
 
-def test_momentum_normal() -> None:
-    """tvl_change_7d/30d 各 0.5 加权均值。"""
+def test_momentum() -> None:
+    """正常 / 缺失 / 异常：tvl_change 各 0.5 加权；任一窗口缺失或非数值 → None。"""
     assert sig.momentum_score(_fund())["value"] == pytest.approx(6.25)
-
-
-def test_momentum_missing() -> None:
-    """输入缺失或任一窗口缺失 → None（不用单窗口凑数）。"""
     assert sig.momentum_score(None)["value"] is None
     assert sig.momentum_score(_fund(tvl_change_30d=_dp(None)))["value"] is None
-
-
-def test_momentum_abnormal() -> None:
-    """非数值字段 → None。"""
     assert sig.momentum_score(_fund(tvl_change_7d=_dp("x")))["value"] is None
 
 
 # ── divergence ─────────────────────────────────────────────
 
 
-def test_divergence_quadrants() -> None:
-    """四象限（7d 窗口 0 为界）：I 双强 / II 弱基本强价格 / III 强基本弱价格 / IV 双弱。"""
+def test_divergence() -> None:
+    """四象限 + 缺失 + 异常：7d 窗口 0 为界 I/II/III/IV；任一缺失或非数值 → None。"""
     d = sig.divergence(_fund(tvl_change_7d=_dp(5.0)), _mkt(change_7d=_dp(3.0)))["value"]
     assert d["divergence_7d"] == pytest.approx(2.0)
     assert d["divergence_30d"] == pytest.approx(10.0 - 5.0)
@@ -198,10 +183,7 @@ def test_divergence_quadrants() -> None:
         ]["quadrant"]
         == "IV"
     )
-
-
-def test_divergence_missing() -> None:
-    """任一缺失 → 对应值 None；7d 缺失 → quadrant=None。"""
+    # 缺失
     assert sig.divergence(None, None)["value"] == {
         "divergence_7d": None,
         "divergence_30d": None,
@@ -210,18 +192,15 @@ def test_divergence_missing() -> None:
     d2 = sig.divergence(_fund(), _mkt(change_7d=_dp(None)))["value"]
     assert d2["divergence_7d"] is None and d2["quadrant"] is None
     assert d2["divergence_30d"] is not None
-
-
-def test_divergence_abnormal() -> None:
-    """非数值字段 → None。"""
-    d = sig.divergence(_fund(), _mkt(change_7d=_dp("x")))["value"]
-    assert d["divergence_7d"] is None and d["quadrant"] is None
+    # 异常
+    d3 = sig.divergence(_fund(), _mkt(change_7d=_dp("x")))["value"]
+    assert d3["divergence_7d"] is None and d3["quadrant"] is None
 
 
 # ── funding_percentile ────────────────────────────────────
 
 
-def test_funding_percentile_normal() -> None:
+def test_funding_percentile() -> None:
     """最新 |funding| 在窗口分布中的分位（0-100），时间升序最新在末尾。"""
     # 三档周期序列（0.0001/0.00015/0.0002 各 4 个），最新为最大档 → 100
     hist = [
@@ -232,58 +211,44 @@ def test_funding_percentile_normal() -> None:
     # 最新改为最小档（0.0001 出现 5 次/12）→ 41.7
     hist[-1]["funding_rate"] = 0.0001
     assert sig.funding_percentile(hist) == pytest.approx(41.7, abs=0.1)
+    # 中位：等差 11 个，最新为中位值 → 50 附近
+    vals = [0.0001 + i * 0.00001 for i in range(11)]
+    hist_mid = [{"funding_time": i, "funding_rate": v} for i, v in enumerate(vals)]
+    hist_mid[-1]["funding_rate"] = 0.00015
+    assert sig.funding_percentile(hist_mid) == pytest.approx(54.5, abs=0.1)
 
 
-def test_funding_percentile_mid() -> None:
-    """最新处于分布中位 → 50 附近。"""
-    vals = [0.0001 + i * 0.00001 for i in range(11)]  # 等差 11 个
-    hist = [{"funding_time": i, "funding_rate": v} for i, v in enumerate(vals)]
-    hist[-1]["funding_rate"] = 0.00015  # 中位值
-    assert sig.funding_percentile(hist) == pytest.approx(54.5, abs=0.1)
-
-
-def test_funding_percentile_insufficient() -> None:
-    """样本 <10 / 空 / None → None（UNKNOWN 纪律）。"""
+def test_funding_percentile_degenerate_and_abnormal() -> None:
+    """样本不足 / 空 / 常数序列（无分位信息）→ None；非法值过滤后计算。"""
     hist = [
         {"funding_time": i, "funding_rate": 0.0001 * (1 + i * 0.1)}
         for i in range(9)
     ]
-    assert sig.funding_percentile(hist) is None
+    assert sig.funding_percentile(hist) is None  # 样本 <10
     assert sig.funding_percentile(None) is None
     assert sig.funding_percentile([]) is None
-
-
-def test_funding_percentile_constant() -> None:
-    """常数序列（分布退化，无分位信息）→ None。"""
-    hist = [{"funding_time": i, "funding_rate": 0.0001} for i in range(20)]
-    assert sig.funding_percentile(hist) is None
-
-
-def test_funding_percentile_abnormal() -> None:
-    """最新值非法 → None；序列含非法值但最新合法 → 过滤后计算。"""
-    hist = [
+    const = [{"funding_time": i, "funding_rate": 0.0001} for i in range(20)]
+    assert sig.funding_percentile(const) is None  # 分布退化
+    # 异常：样本充足（15）时，最新值非法 → None；序列含非法但最新合法 → 过滤后计算
+    hist15 = [
         {"funding_time": i, "funding_rate": 0.0001 * (1 + i * 0.1)}
         for i in range(15)
     ]
-    bad = [*hist, {"funding_time": 99, "funding_rate": "oops"}]
-    assert sig.funding_percentile(bad) is None
-    hist[3]["funding_rate"] = "bad"
-    assert sig.funding_percentile(hist) is not None
+    bad = [*hist15, {"funding_time": 99, "funding_rate": "oops"}]
+    assert sig.funding_percentile(bad) is None  # 最新值非法
+    hist15[3]["funding_rate"] = "bad"
+    assert sig.funding_percentile(hist15) is not None  # 序列含非法但最新合法
 
 
 # ── oi_price_divergence ────────────────────────────────────
 
 
-def test_oi_divergence_quadrants() -> None:
-    """四象限：价 OI 同向 = 新仓确认，背离 = 存量换手弱势。"""
+def test_oi_price_divergence() -> None:
+    """四象限：价 OI 同向 = 新仓确认，背离 = 存量换手弱势；缺失/零值 → none。"""
     assert sig.oi_price_divergence(2.0, 5.0)["label"] == "confirm_long"
     assert sig.oi_price_divergence(2.0, -5.0)["label"] == "weak_long"
     assert sig.oi_price_divergence(-2.0, 5.0)["label"] == "confirm_short"
     assert sig.oi_price_divergence(-2.0, -5.0)["label"] == "weak_short"
-
-
-def test_oi_divergence_missing_or_zero() -> None:
-    """缺失 → None（UNKNOWN 纪律）；0 → none（零值无方向）；note 非空。"""
     assert sig.oi_price_divergence(None, 5.0) is None
     assert sig.oi_price_divergence(2.0, None) is None
     for price, oi in ((0.0, 5.0), (2.0, 0.0)):
@@ -295,8 +260,8 @@ def test_oi_divergence_missing_or_zero() -> None:
 # ── sentiment_raw ──────────────────────────────────────────
 
 
-def test_sentiment_normal() -> None:
-    """持仓指标原始值直读（数值与字符串均原样），不做阈值打分。"""
+def test_sentiment_raw() -> None:
+    """正常 / 缺失 / 异常：持仓指标直读（不打分）；输入缺失 → 全 None。"""
     s = sig.sentiment_raw(_mkt(), _ms())
     assert s["components"] == {
         "funding": 0.0001,
@@ -313,22 +278,71 @@ def test_sentiment_normal() -> None:
         },
     }
     assert "DECIDE_PROMPT" in s["note"]
+    # 缺失
+    s2 = sig.sentiment_raw(None, None)
+    assert all(v is None for v in s2["components"].values())
+    assert s2["note"]
+    # 异常：ms 缺失 / 字段非 dict → 对应 None；mkt 正常字段不受影响
+    s3 = sig.sentiment_raw(_mkt(), None)
+    assert s3["components"]["funding"] == 0.0001
+    assert s3["components"]["ls_ratio_all"] is None
+    s4 = sig.sentiment_raw(_mkt(), {"ls_ratio_all": "oops"})
+    assert s4["components"]["ls_ratio_all"] is None
 
 
-def test_sentiment_missing() -> None:
-    """输入缺失 → components 全 None。"""
-    s = sig.sentiment_raw(None, None)
-    assert all(v is None for v in s["components"].values())
-    assert s["note"]
+# ── 趋势特征（01 票：历史序列确定性提炼） ────────────────
 
 
-def test_sentiment_abnormal() -> None:
-    """ms 缺失 / 字段非 dict → 对应 None；mkt 正常字段不受影响。"""
-    s = sig.sentiment_raw(_mkt(), None)
-    assert s["components"]["funding"] == 0.0001
-    assert s["components"]["ls_ratio_all"] is None
-    s2 = sig.sentiment_raw(_mkt(), {"ls_ratio_all": "oops"})
-    assert s2["components"]["ls_ratio_all"] is None
+def test_series_change() -> None:
+    """最新 vs N 天前变化 %：ISO 与 unix 秒日期兼容；数据不足/非法 → None。"""
+    rows = [
+        {"date": "2026-08-01T00:00:00+00:00", "supply": 100.0},
+        {"date": "2026-08-15T00:00:00+00:00", "supply": 110.0},
+        {"date": "2026-08-31T00:00:00+00:00", "supply": 121.0},
+    ]
+    # 30 天窗口：cutoff=8-01 含首点 → (121-100)/100
+    assert sig.series_change(rows, "supply", 30) == pytest.approx(21.0)
+    # 15 天窗口：cutoff=8-16 排除首点 → 取 8-15 → (121-110)/110
+    assert sig.series_change(rows, "supply", 15) == pytest.approx(10.0)
+    # unix 秒日期兼容（升序，最新在末尾）
+    ts = [{"date": 1700000000 + i * 86400, "supply": 100.0 + i} for i in range(11)]
+    assert sig.series_change(ts, "supply", 5) == pytest.approx((110.0 - 105.0) / 105.0 * 100.0)
+    # 缺失 / 非法：空、单点、窗口天数 ≤0、prev 值 ≤0
+    assert sig.series_change(None, "supply", 30) is None
+    assert sig.series_change([], "supply", 30) is None
+    assert sig.series_change([{"date": 1, "supply": 5.0}], "supply", 30) is None
+    assert sig.series_change(rows, "supply", 0) is None
+    bad = [{"date": 1, "supply": 0.0}, {"date": 86401, "supply": 100.0}]
+    assert sig.series_change(bad, "supply", 1) is None
+    # 非法日期/数值点跳过，合法点照常计算
+    mixed = [
+        {"date": "oops", "supply": 100.0},
+        {"date": 1700000000, "supply": "n/a"},
+        {"date": 1697580800, "supply": 110.0},
+        {"date": 1700172800, "supply": 121.0},
+    ]
+    assert sig.series_change(mixed, "supply", 30) == pytest.approx(10.0)
+
+
+def test_series_trend() -> None:
+    """前后半段均值比分档：≥+3% rising / ≤-3% falling / 其余 flat；窗口不足 → None。"""
+    up = [{"date": i, "tvl": 100.0 + 3 * i} for i in range(8)]
+    assert sig.series_trend(up, "tvl", 30) == "rising"
+    down = [{"date": i, "tvl": 130.0 - 3 * i} for i in range(8)]
+    assert sig.series_trend(down, "tvl", 30) == "falling"
+    flat = [{"date": i, "tvl": 100.0} for i in range(8)]
+    assert sig.series_trend(flat, "tvl", 30) == "flat"
+    wobble = [{"date": i, "tvl": 100.0 + (i % 2)} for i in range(8)]
+    assert sig.series_trend(wobble, "tvl", 30) == "flat"
+    # 窗口过滤：仅最近 days 天内的点参与
+    old = [{"date": i - 100, "tvl": 10.0} for i in range(5)]
+    recent = [{"date": i, "tvl": 100.0 + 3 * i} for i in range(8)]
+    assert sig.series_trend([*old, *recent], "tvl", 30) == "rising"
+    # 缺失 / 数据不足
+    assert sig.series_trend(None, "tvl", 30) is None
+    assert sig.series_trend([], "tvl", 30) is None
+    assert sig.series_trend([{"date": 1, "tvl": 1.0}], "tvl", 30) is None
+    assert sig.series_trend([{"date": i, "tvl": 1.0} for i in range(3)], "tvl", 30) is None
 
 
 # ── compute_signals 节点 ───────────────────────────────────

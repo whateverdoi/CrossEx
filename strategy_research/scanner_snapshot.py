@@ -56,6 +56,14 @@ _MICRO_COLS = (
 )
 
 
+def _strip_quote(symbol: str) -> str:
+    """交易对 → 裸符号（AKEUSDT → AKE）：扫描器 CSV 均为 USDT 永续对，
+
+    消费端（context/report）按裸符号 token 查询，key 命名空间须一致。
+    """
+    return symbol.removesuffix("USDT")
+
+
 def _num(value: str) -> float | None:
     """CSV 字符串 → float；空/非法/NaN → None（UNKNOWN 纪律）。"""
     s = (value or "").strip()
@@ -104,7 +112,7 @@ def _read_market(d: Path, date: str) -> dict[str, dict]:
                     else (row.get("onboard_date") or "").strip() or None
                 )
             entry["boards"] = []
-            out[symbol] = entry
+            out[_strip_quote(symbol)] = entry
     return out
 
 
@@ -120,7 +128,7 @@ def _boards_by_symbol(d: Path, date: str) -> dict[str, list[str]]:
             board = (row.get("board") or "").strip()
             if not symbol or not board:
                 continue
-            boards = out.setdefault(symbol, [])
+            boards = out.setdefault(_strip_quote(symbol), [])
             if board not in boards:
                 boards.append(board)
     return out
@@ -144,13 +152,14 @@ def _read_microstructure(d: Path, date: str) -> dict[str, dict]:
                     if col != "funding_trend"
                     else (row.get("funding_trend") or "").strip() or None
                 )
-            out[symbol] = entry
+            out[_strip_quote(symbol)] = entry
     return out
 
 
 def load_snapshots(dir: str | None = None, date: str | None = None) -> dict:
     """扫描器快照 → ``{"date", "market": {symbol: {...}}, "microstructure": {symbol: {...}}}``。
 
+    symbol 为裸符号（AKEUSDT → AKE），与消费端 token 命名空间一致；
     目录/文件缺失或解析异常 → ``{}``（绝不抛异常，调用方占位即可）；
     ``date`` 缺省取目录内最新 ``*_all.csv``；``SR_SCAN_DIR`` / ``SR_SCAN_DATE``
     环境变量为兜底配置。

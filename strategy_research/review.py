@@ -2,7 +2,7 @@
 
 评估回路：每批运行扫描 ``reports/`` 历史 run.json，对到期（run_ts + 7d ≤ now）
 的带方向决策（TRADE/WATCH）用日线 klines 计算相对基准价的 T+1d/T+7d 收益，
-输出方向命中率与置信度分箱校准，供 overview「决策复盘」节（12 票）与
+输出方向命中率与置信度分箱校准，供 run.json decision_review 节点（12 票）与
 prompt 校准基线（13 票：:func:`render_calibration_context` 渲染，① 加载进 meta，
 ③-⑥ 摘要携带）消费。
 

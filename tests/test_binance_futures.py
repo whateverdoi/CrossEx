@@ -11,8 +11,8 @@ from strategy_research.datasources.mock import MOCK_TOKENS
 SYM = "BTCUSDT"
 
 
-def test_fetch_mark_price_mock() -> None:
-    """mark_price（premium/funding）mock 同构。"""
+def test_mock_point_and_all_endpoints() -> None:
+    """mock 单点/全量端点：mark_price、premium_index_all、fapi_prices_all、open_interest。"""
     row = futures.fetch_mark_price(SYM)
     assert row is not None
     assert set(row) == {
@@ -25,8 +25,28 @@ def test_fetch_mark_price_mock() -> None:
     assert isinstance(row["mark_price"], float)
     assert isinstance(row["next_funding_time"], int)
 
+    rows = futures.fetch_premium_index_all()
+    assert isinstance(rows, list) and len(rows) == len(MOCK_TOKENS)
+    assert set(rows[0]) == {
+        "symbol",
+        "mark_price",
+        "index_price",
+        "last_funding_rate",
+        "next_funding_time",
+    }
+    assert isinstance(rows[0]["mark_price"], float)
+    assert isinstance(rows[0]["next_funding_time"], int)
 
-def test_fetch_open_interest_hist_mock() -> None:
+    prices = futures.fetch_fapi_prices_all()
+    assert isinstance(prices, dict)
+    assert set(prices) == {s + "USDT" for s in MOCK_TOKENS}
+    assert all(isinstance(v, float) for v in prices.values())
+
+    assert futures.fetch_open_interest(SYM) == {"symbol": SYM, "open_interest": 12345.6}
+
+
+def test_mock_series_shapes() -> None:
+    """mock 序列形状：OI 历史/多空比/taker/资金费率时间序列字段齐备。"""
     rows = futures.fetch_open_interest_hist(SYM)
     assert isinstance(rows, list) and len(rows) > 0
     assert set(rows[0]) == {
@@ -36,8 +56,6 @@ def test_fetch_open_interest_hist_mock() -> None:
         "timestamp",
     }
 
-
-def test_fetch_global_long_short_ratio_mock() -> None:
     rows = futures.fetch_global_long_short_ratio(SYM)
     assert isinstance(rows, list) and len(rows) > 0
     assert set(rows[0]) == {
@@ -48,9 +66,6 @@ def test_fetch_global_long_short_ratio_mock() -> None:
         "timestamp",
     }
 
-
-def test_fetch_top_long_short_ratios_mock() -> None:
-    """topLongShortAccountRatio 与 topLongShortPositionRatio 均可用。"""
     for fn in (
         futures.fetch_top_long_short_account_ratio,
         futures.fetch_top_long_short_position_ratio,
@@ -59,8 +74,6 @@ def test_fetch_top_long_short_ratios_mock() -> None:
         assert isinstance(rows, list) and len(rows) > 0
         assert {"long_short_ratio", "timestamp"} <= set(rows[0])
 
-
-def test_fetch_taker_long_short_ratio_mock() -> None:
     rows = futures.fetch_taker_long_short_ratio(SYM)
     assert isinstance(rows, list) and len(rows) > 0
     assert set(rows[0]) == {
@@ -70,6 +83,16 @@ def test_fetch_taker_long_short_ratio_mock() -> None:
         "sell_vol",
         "timestamp",
     }
+
+    rows = futures.fetch_funding_rate_history(SYM)
+    assert isinstance(rows, list) and len(rows) == 25
+    assert set(rows[0]) == {"funding_time", "funding_rate"}
+    assert isinstance(rows[0]["funding_time"], int)
+    assert isinstance(rows[0]["funding_rate"], float)
+    # 时间升序（最新在末尾，与真实 API 同向）；间隔 8 小时
+    stamps = [r["funding_time"] for r in rows]
+    assert stamps == sorted(stamps)
+    assert stamps[-1] - stamps[-2] == 8 * 3_600_000
 
 
 def test_fetch_exchange_info_mock() -> None:
@@ -153,10 +176,8 @@ def test_fetch_listing_days_real_computes_days(monkeypatch: pytest.MonkeyPatch) 
     assert days["ETHUSDT"] == 0
 
 
-def test_fetch_open_interest_hist_real_maps_fields(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """真实响应 camelCase+字符串 → snake_case+数值（与 mock 同构）。"""
+def test_fetch_series_real_maps_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    """真实响应 camelCase+字符串 → snake_case+数值（与 mock 同构）；缺 symbol 补上。"""
     monkeypatch.setenv("SR_MOCK", "0")
 
     def fake_call(fn, **kwargs):
@@ -183,11 +204,6 @@ def test_fetch_open_interest_hist_real_maps_fields(
         "timestamp": 1787281200000,
     }
 
-
-def test_fetch_taker_ratio_real_adds_symbol(monkeypatch: pytest.MonkeyPatch) -> None:
-    """taker 真实响应无 symbol 字段 → 补 symbol（与 mock 同构）。"""
-    monkeypatch.setenv("SR_MOCK", "0")
-
     def fake_call(fn, **kwargs):
         return [
             {
@@ -211,52 +227,36 @@ def test_fetch_taker_ratio_real_adds_symbol(monkeypatch: pytest.MonkeyPatch) -> 
         "timestamp": 1787277600000,
     }
 
+    def fake_call(fn, **kwargs):
+        assert kwargs.get("symbol") == SYM
+        return [
+            {"symbol": SYM, "fundingTime": 1780000000000, "fundingRate": "0.0001"},
+            {
+                "symbol": SYM,
+                "fundingTime": 1780000000000,
+                "fundingRate": "bad",
+            },  # 解析失败跳过
+        ]
 
-def test_fetch_premium_index_all_mock() -> None:
-    """全量 premiumIndex mock：与单 symbol 版本同构字段。"""
-    rows = futures.fetch_premium_index_all()
-    assert isinstance(rows, list) and len(rows) == len(MOCK_TOKENS)
-    assert set(rows[0]) == {
-        "symbol",
-        "mark_price",
-        "index_price",
-        "last_funding_rate",
-        "next_funding_time",
-    }
-    assert isinstance(rows[0]["mark_price"], float)
-    assert isinstance(rows[0]["next_funding_time"], int)
+    monkeypatch.setattr(
+        "strategy_research.datasources._binance_sdk.sync_call_with_rate_limit",
+        fake_call,
+    )
+    rows = futures.fetch_funding_rate_history(SYM, limit=2)
+    assert rows == [{"funding_time": 1780000000000, "funding_rate": 0.0001}]
 
+    def fake_call(fn, **kwargs):
+        return {"symbol": SYM, "openInterest": "12345.6"}
 
-def test_fetch_fapi_prices_all_mock() -> None:
-    """全量合约价格 mock：dict[symbol, price]。"""
-    prices = futures.fetch_fapi_prices_all()
-    assert isinstance(prices, dict)
-    assert set(prices) == {s + "USDT" for s in MOCK_TOKENS}
-    assert all(isinstance(v, float) for v in prices.values())
-
-
-def test_fetch_funding_rate_history_mock() -> None:
-    rows = futures.fetch_funding_rate_history(SYM)
-    assert isinstance(rows, list) and len(rows) == 25
-    assert set(rows[0]) == {"funding_time", "funding_rate"}
-    assert isinstance(rows[0]["funding_time"], int)
-    assert isinstance(rows[0]["funding_rate"], float)
-    # 时间升序（最新在末尾，与真实 API 同向）；间隔 8 小时
-    stamps = [r["funding_time"] for r in rows]
-    assert stamps == sorted(stamps)
-    assert stamps[-1] - stamps[-2] == 8 * 3_600_000
+    monkeypatch.setattr(
+        "strategy_research.datasources._binance_sdk.sync_call_with_rate_limit",
+        fake_call,
+    )
+    assert futures.fetch_open_interest(SYM) == {"symbol": SYM, "open_interest": 12345.6}
 
 
-def test_fetch_open_interest_mock() -> None:
-    row = futures.fetch_open_interest(SYM)
-    assert row is not None
-    assert row == {"symbol": SYM, "open_interest": 12345.6}
-
-
-def test_fetch_premium_index_all_real_maps_fields(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """真实全量响应（无 symbol 参数）→ 数值化列表。"""
+def test_fetch_all_endpoints_real_maps_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    """真实全量端点：premiumIndex 不带 symbol 参数；fapi 价格 None 跳过。"""
     monkeypatch.setenv("SR_MOCK", "0")
 
     def fake_call(fn, **kwargs):
@@ -292,13 +292,6 @@ def test_fetch_premium_index_all_real_maps_fields(
     }
     assert len(rows) == 2
 
-
-def test_fetch_fapi_prices_all_real_maps_fields(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """真实全量价格 → dict[symbol, float]。"""
-    monkeypatch.setenv("SR_MOCK", "0")
-
     def fake_call(fn, **kwargs):
         return [
             {"symbol": "BTCUSDT", "price": "70000.0"},
@@ -312,45 +305,6 @@ def test_fetch_fapi_prices_all_real_maps_fields(
     )
     prices = futures.fetch_fapi_prices_all()
     assert prices == {"BTCUSDT": 70000.0, "ETHUSDT": 3500.0}
-
-
-def test_fetch_funding_rate_history_real_maps_fields(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """真实 fundingRate 历史 → [{funding_time, funding_rate}]。"""
-    monkeypatch.setenv("SR_MOCK", "0")
-
-    def fake_call(fn, **kwargs):
-        assert kwargs.get("symbol") == SYM
-        return [
-            {"symbol": SYM, "fundingTime": 1780000000000, "fundingRate": "0.0001"},
-            {
-                "symbol": SYM,
-                "fundingTime": 1780000000000,
-                "fundingRate": "bad",
-            },  # 解析失败跳过
-        ]
-
-    monkeypatch.setattr(
-        "strategy_research.datasources._binance_sdk.sync_call_with_rate_limit",
-        fake_call,
-    )
-    rows = futures.fetch_funding_rate_history(SYM, limit=2)
-    assert rows == [{"funding_time": 1780000000000, "funding_rate": 0.0001}]
-
-
-def test_fetch_open_interest_real_maps_fields(monkeypatch: pytest.MonkeyPatch) -> None:
-    """真实 openInterest → {symbol, open_interest} float 化。"""
-    monkeypatch.setenv("SR_MOCK", "0")
-
-    def fake_call(fn, **kwargs):
-        return {"symbol": SYM, "openInterest": "12345.6"}
-
-    monkeypatch.setattr(
-        "strategy_research.datasources._binance_sdk.sync_call_with_rate_limit",
-        fake_call,
-    )
-    assert futures.fetch_open_interest(SYM) == {"symbol": SYM, "open_interest": 12345.6}
 
 
 def test_fetch_mark_price_failure_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:

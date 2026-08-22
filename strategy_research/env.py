@@ -89,9 +89,10 @@ def get_llm(
 
 # ── LLM 层 mock（07 票：SR_MOCK=1 全离线确定性假模型）──────────────────
 
-#: 假模型调用计数（按 prompt 特征分类；验收"PASS 透传零调用"可验证）
-_MOCK_CALL_COUNTS = {"facts": 0, "decide": 0, "challenge": 0, "rebuttals": 0}
-LIVE_CALL_COUNTS = {"facts": 0, "decide": 0, "challenge": 0, "rebuttals": 0}
+#: 假模型调用计数（按 prompt 特征分类；03 票：计数键改为 bull/bear，
+#: 旧决策链键退役——旧节点死代码不再计数，05 票清理）
+_MOCK_CALL_COUNTS = {"bull": 0, "bear": 0}
+LIVE_CALL_COUNTS = {"bull": 0, "bear": 0}
 
 
 class _LiveCallCounter(BaseCallbackHandler):
@@ -105,8 +106,16 @@ class _LiveCallCounter(BaseCallbackHandler):
 
 
 def live_call_counter(key: str) -> BaseCallbackHandler:
-    """按调用点取计数 handler（key ∈ facts/decide/challenge/rebuttals）。"""
+    """按调用点取计数 handler（key ∈ bull/bear，03 票）。"""
     return _LiveCallCounter(key)
+
+
+def reset_call_counts() -> None:
+    """运行起点重置调用计数（mock/live 双路径归零）：
+    run.json 的 llm_calls 应反映本次运行，而非跨运行累计值。"""
+    for key in _MOCK_CALL_COUNTS:
+        _MOCK_CALL_COUNTS[key] = 0
+        LIVE_CALL_COUNTS[key] = 0
 
 #: mock 决策映射（确定性 fixtures，与 datasources/mock.py 固定候选同性质；
 #: 其余 symbol → PASS，保证 PASS 透传路径可测）
@@ -141,6 +150,26 @@ _MOCK_REBUTTALS_JSON = """{
   "rebuttals": [
     {"challenge_claim": "TVL 30d 增速环比放缓，错价依据不可持续", "response": "TVL 增速仍为正且 fees 同步增长，增长质量未恶化，维持错价判断", "outcome": "rebutted"},
     {"challenge_claim": "2026-Q3 解锁 1.2% 流通量，催化剂窗口存疑", "response": "承认解锁抛压风险，纳入风险清单并下调置信度", "outcome": "accepted"}
+  ]
+}"""
+
+#: 分支 bull 固定响应（02 票）：3 条，basis 引用 mock 恒定快照值
+#: （momentum 6.25 / sentiment 固定组件 / 微观结构 OI 0.0），与 mock 全链快照
+#: 逐值一致 → 核验必过（交叉验证：test_evidence 全量断言无剔除）
+_MOCK_BULL_JSON = """{
+  "evidence": [
+    {"claim": "动量分为正（TVL 增速加权，确定性计算）", "basis": {"domain": "signals", "field": "momentum.value", "value": "6.25"}, "source": "signals"},
+    {"claim": "funding 费率 0.0001 处低位，无多头拥挤", "basis": {"domain": "signals", "field": "sentiment.components.funding", "value": "0.0001"}, "source": "signals"},
+    {"claim": "多空人数比 1.05 偏多", "basis": {"domain": "signals", "field": "sentiment.components.ls_ratio_all", "value": "1.05"}, "source": "signals"}
+  ]
+}"""
+
+#: 分支 bear 固定响应（02 票）：3 条，同上引用 mock 恒定快照值（含跨域微观结构）
+_MOCK_BEAR_JSON = """{
+  "evidence": [
+    {"claim": "OI 24h 无增量（0.0%），缺乏新仓动能", "basis": {"domain": "signals", "field": "sentiment.components.oi_change_24h", "value": "0.0"}, "source": "signals"},
+    {"claim": "taker 主动买卖比 1.0 中性，无追涨情绪", "basis": {"domain": "signals", "field": "sentiment.components.taker_bs_ratio", "value": "1.0"}, "source": "signals"},
+    {"claim": "微观结构 OI 24h 变化 0.0%，存量换手主导", "basis": {"domain": "microstructure_data", "field": "oi_change_24h.value", "value": "0.0"}, "source": "microstructure_data"}
   ]
 }"""
 
@@ -197,17 +226,19 @@ class _MockChatModel(FakeMessagesListChatModel):
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
         text = " ".join(getattr(m, "content", "") or "" for m in messages)
-        if "事实收集员" in text:  # FACTS_PROMPT
-            _MOCK_CALL_COUNTS["facts"] += 1
+        if "事实收集员" in text:  # FACTS_PROMPT（03 票退役路径，05 清理）
             content = _MOCK_FACTS_JSON
-        elif "对抗官" in text:  # CHALLENGE_PROMPT
-            _MOCK_CALL_COUNTS["challenge"] += 1
+        elif "对抗官" in text:  # CHALLENGE_PROMPT（退役路径）
             content = _MOCK_CHALLENGES_JSON
-        elif "复审员" in text:  # FINALIZE_PROMPT
-            _MOCK_CALL_COUNTS["rebuttals"] += 1
+        elif "复审员" in text:  # FINALIZE_PROMPT（退役路径）
             content = _MOCK_REBUTTALS_JSON
-        else:  # DECIDE_PROMPT（策略研究员）
-            _MOCK_CALL_COUNTS["decide"] += 1
+        elif "多头证据研究员" in text:  # BULL_PROMPT
+            _MOCK_CALL_COUNTS["bull"] += 1
+            content = _MOCK_BULL_JSON
+        elif "空头证据研究员" in text:  # BEAR_PROMPT
+            _MOCK_CALL_COUNTS["bear"] += 1
+            content = _MOCK_BEAR_JSON
+        else:  # 旧 DECIDE_PROMPT（03 票退役路径）
             content = _mock_decide_json(text)
         return ChatResult(
             generations=[ChatGeneration(message=AIMessage(content=content))]
