@@ -145,7 +145,8 @@ class EvidenceItem(BaseModel):
 class TokenAnalysis(BaseModel):
     """④ 决策输出（json_mode）。无 max_loss/invalidation（Q5 决策：
     LLM 主观值不配进确定性核验）；TRADE/WATCH 时 trade_structure 必填
-    （进交易计划，不参与风控核验）。"""
+    （进交易计划，不参与风控核验）；horizon 为描述性评估窗口（05 票：
+    仅评估记账，不参与风控核验，不设价格锚点）。"""
 
     symbol: str = Field(default="", description="交易对符号")
     decision: Literal["TRADE", "WATCH", "PASS"] = Field(
@@ -169,6 +170,11 @@ class TokenAnalysis(BaseModel):
     quadrant: str = Field(default="", description="信号四象限 I/II/III/IV")
     valuation_summary: str = Field(default="", description="估值解读")
     trade_structure: str = Field(default="", description="交易结构（TRADE/WATCH 必填）")
+    horizon: Literal["short_term", "trend", ""] = Field(
+        default="",
+        description="评估窗口（05 票，描述性）：short_term=预期 1-7 天内兑现的错价 / "
+        "trend=中期趋势判断；仅评估记账，不参与风控核验，不设价格锚点",
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -200,6 +206,7 @@ class TokenAnalysis(BaseModel):
             "quadrant": _text(data.get("quadrant")),
             "valuation_summary": _text(data.get("valuation_summary")),
             "trade_structure": _text(data.get("trade_structure")),
+            "horizon": _pick(data.get("horizon"), ("short_term", "trend", ""), ""),
         }
 
 

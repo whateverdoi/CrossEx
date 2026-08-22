@@ -76,10 +76,13 @@ _ANALYZE_BODY = (
     "且必须声明 direction（long/short）：基本面强价格弱 / 象限 I、III → long；"
     "基本面弱价格强 / 象限 II（高估）→ short；象限 IV 双弱不做空。"
     "证据不足时 PASS 是正确选择，PASS 允许高频出现。TRADE/WATCH 时 trade_structure 必填"
-    "（进交易计划，不参与风控核验）；不设价格锚点与有效期，失效由周期性重跑信号对比管理。\n"
+    "（进交易计划，不参与风控核验）；同时声明评估窗口 horizon：short_term（预期 1-7 天内"
+    "兑现的错价）或 trend（中期趋势判断）；horizon 仅评估记账，不参与风控核验，不设价格"
+    "锚点，失效由周期性重跑信号对比管理。\n"
     "8. 输出 JSON，字段：symbol、decision、direction、confidence、fundamental_thesis、"
     "market_thesis、market_implied_expectation、mispricing、catalyst、risks、evidence、"
-    "data_quality、fundamental_score、quadrant、valuation_summary、trade_structure。"
+    "data_quality、fundamental_score、quadrant、valuation_summary、trade_structure、"
+    "horizon。"
 )
 
 ANALYZE_PROMPT = _ANALYZE_HEAD + _ANALYZE_EVIDENCE_RULE + _ANALYZE_BODY

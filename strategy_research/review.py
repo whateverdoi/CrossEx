@@ -93,6 +93,7 @@ def calibrate(records: list[dict]) -> dict:
         "by_confidence": [],
         "by_decision": {},
         "by_signal": {},
+        "by_horizon": [],
     }
     edges = [0.0, *_CONF_BINS, 1.0]
     for lo, hi in pairwise(edges):
@@ -115,6 +116,8 @@ def calibrate(records: list[dict]) -> dict:
             stats["by_decision"][dec] = {"n": len(sub), "hit_rate": _rate(sub)}
     # 04 票：按确定性信号状态分桶（旧记录无 signal_state → 空桶，不误伤）
     ss = lambda r: r.get("signal_state") or {}
+    # 05 票：按声明的评估窗口分桶（旧记录无 horizon → 空桶，不误伤）
+    stats["by_horizon"] = _bucket(valid, lambda r: r.get("horizon") or None)
     stats["by_signal"] = {
         "quadrant": _bucket(valid, lambda r: ss(r).get("quadrant")),
         "momentum": _bucket(valid, lambda r: _momentum_sign(ss(r).get("momentum"))),
@@ -214,6 +217,7 @@ def review_past_decisions(
                         "direction": direction,
                         "confidence": row.get("confidence"),
                         "signal_state": row.get("signal_state") or {},
+                        "horizon": row.get("horizon") or "",
                         "run_ts": meta.get("run_ts"),
                         "run_dir": run_dir,
                         **rets,

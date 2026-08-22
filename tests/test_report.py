@@ -617,3 +617,25 @@ def test_review_lines_renders_signal_buckets():
     assert "| III | 2 | 0.5 |" in text
     # 空桶不渲染
     assert "momentum：" not in text
+
+
+def test_review_lines_renders_horizon_buckets():
+    """05 票：决策复盘节渲染评估窗口分桶（无 horizon 记录 → 不渲染）。"""
+    from strategy_research import report
+
+    review = {
+        "records": [{"hit_7d": True}],
+        "stats": {
+            "n": 1,
+            "hit_rate": 1.0,
+            "by_decision": {},
+            "by_confidence": [],
+            "by_signal": {},
+            "by_horizon": [{"value": "trend", "n": 1, "hit_rate": 1.0}],
+        },
+    }
+    text = "\n".join(report._review_lines(review))
+    assert "按评估窗口：trend → 1.0（n=1）" in text
+
+    review["stats"]["by_horizon"] = []
+    assert "按评估窗口" not in "\n".join(report._review_lines(review))

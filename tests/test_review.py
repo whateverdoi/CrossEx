@@ -472,3 +472,47 @@ class TestCalibrateBySignal:
         out = review.review_past_decisions(tmp_path, now=_NOW)
         rec = out["records"][0]
         assert rec["signal_state"] == {"quadrant": "III", "momentum": 5.0}
+
+
+# ── 评估窗口分桶（05 票：决策声明评估窗口，评估记账对齐尺度） ──
+
+
+class TestCalibrateByHorizon:
+    def test_buckets_by_horizon(self):
+        stats = review.calibrate(
+            [
+                {"hit_7d": True, "decision": "TRADE", "confidence": 0.7, "horizon": "short_term"},
+                {"hit_7d": False, "decision": "TRADE", "confidence": 0.7, "horizon": "short_term"},
+                {"hit_7d": True, "decision": "WATCH", "confidence": 0.5, "horizon": "trend"},
+                {"hit_7d": True, "decision": "TRADE", "confidence": 0.6},  # 旧记录无 horizon
+            ]
+        )
+        h = {b["value"]: b for b in stats["by_horizon"]}
+        assert h["short_term"]["n"] == 2 and h["short_term"]["hit_rate"] == 0.5
+        assert h["trend"]["n"] == 1 and h["trend"]["hit_rate"] == 1.0
+        assert set(h) == {"short_term", "trend"}  # 空串不计入
+
+    def test_horizon_captured_in_records(self, tmp_path, monkeypatch):
+        """回看记录捕获 run.json 里的 horizon。"""
+        run_dir = tmp_path / "20260102T000000Z000000"
+        run_dir.mkdir(parents=True)
+        (run_dir / "run.json").write_text(
+            json.dumps(
+                {
+                    "meta": {"run_ts": "2026-01-02T00:00:00+00:00", "mode": "live"},
+                    "results": [
+                        {
+                            "symbol": "BTC",
+                            "decision": "TRADE",
+                            "direction": "long",
+                            "confidence": 0.7,
+                            "horizon": "trend",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(review.binance, "fetch_klines", lambda *a, **k: _STD_KLINES)
+        out = review.review_past_decisions(tmp_path, now=_NOW)
+        assert out["records"][0]["horizon"] == "trend"

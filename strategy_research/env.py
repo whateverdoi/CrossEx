@@ -179,6 +179,7 @@ def _mock_decide_json(text: str) -> str:
             "trade_structure": (
                 "分批建仓，回撤 5% 止损（mock）" if decision != "PASS" else ""
             ),
+            "horizon": "short_term" if decision != "PASS" else "",
         },
         ensure_ascii=False,
     )

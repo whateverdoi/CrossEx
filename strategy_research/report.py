@@ -276,6 +276,12 @@ def _review_lines(review: dict | None) -> list[str]:
     )
     for dec, s in (stats.get("by_decision") or {}).items():
         lines.append(f"- {dec}：{s['n']} 条，命中率 {s['hit_rate']}")
+    by_h = stats.get("by_horizon") or []
+    if by_h:
+        lines.append(
+            "- 按评估窗口："
+            + "、".join(f"{b['value']} → {b['hit_rate']}（n={b['n']}）" for b in by_h)
+        )
     by_sig = stats.get("by_signal") or {}
     sig_keys = [k for k in ("quadrant", "momentum", "funding_pctile", "oi_divergence") if by_sig.get(k)]
     if sig_keys:

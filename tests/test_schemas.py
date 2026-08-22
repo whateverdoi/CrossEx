@@ -220,3 +220,11 @@ def test_extract_json_no_inner_fallback() -> None:
     """外层对象不闭合时不回退内层数组（契约是对象，.get 不崩溃）。"""
     obj = s._extract_json('{"facts": [{"claim": "a"}]')
     assert isinstance(obj, dict)  # 补闭合成功，而非返回内层列表
+
+
+def test_token_analysis_horizon_whitelist() -> None:
+    """05 票：horizon 描述性评估窗口，白名单归一，非法 → 空。"""
+    assert s.TokenAnalysis.model_validate({"horizon": "short_term"}).horizon == "short_term"
+    assert s.TokenAnalysis.model_validate({"horizon": "Trend"}).horizon == "trend"
+    assert s.TokenAnalysis.model_validate({"horizon": "week"}).horizon == ""
+    assert s.TokenAnalysis.model_validate({}).horizon == ""
