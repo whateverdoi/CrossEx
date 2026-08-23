@@ -81,9 +81,7 @@ def test_evidence_item_schema_contract() -> None:
 
 def test_evidence_item_tolerant_parse() -> None:
     """宽容解析：坏输入归一不抛异常（字段漂移/非 dict basis → 默认值）。"""
-    item = EvidenceItem.model_validate(
-        {"claim": "x", "basis": "oops", "source": 123}
-    )
+    item = EvidenceItem.model_validate({"claim": "x", "basis": "oops", "source": 123})
     assert item.claim == "x"
     assert item.basis.domain == "" and item.basis.field == "" and item.basis.value == ""
     assert item.source == "123"
@@ -106,7 +104,14 @@ def test_verify_passes_valid_basis() -> None:
         _ev(claim="动量分为正"),
         _ev(claim="象限 III", field="divergence.value.quadrant", value="III"),
     ]
-    bear = [_ev(claim="OI 无增量", domain="microstructure_data", field="oi_change_24h.value", value="0.0")]
+    bear = [
+        _ev(
+            claim="OI 无增量",
+            domain="microstructure_data",
+            field="oi_change_24h.value",
+            value="0.0",
+        )
+    ]
     verified, rejected = ev.verify_evidence({"BTC": bull}, {"BTC": bear}, _state())
     assert verified["BTC"]["bull_case"] == bull
     assert verified["BTC"]["bear_case"] == bear
@@ -130,11 +135,11 @@ def test_verify_rejects_missing_field() -> None:
 
 
 def test_verify_rejects_value_mismatch() -> None:
-    """值不一致（引用 6.26 vs 快照 6.25）：剔除留痕含双方值。"""
-    bull = [_ev(value="6.26")]
+    """值不一致（引用 6.35 vs 快照 6.25，差 0.10 超出 0.05 容差）：剔除留痕含双方值。"""
+    bull = [_ev(value="6.35")]
     verified, rejected = ev.verify_evidence({"BTC": bull}, {}, _state())
     assert verified["BTC"]["bull_case"] == []
-    assert rejected["BTC"][0]["reason"] == "值不一致: 引用 6.26 vs 快照 6.25"
+    assert rejected["BTC"][0]["reason"] == "值不一致: 引用 6.35 vs 快照 6.25"
 
 
 def test_verify_value_tolerance() -> None:
@@ -142,10 +147,72 @@ def test_verify_value_tolerance() -> None:
     bull = [_ev(domain="fundamental_data", field="tvl.value", value="1007")]
     verified, _ = ev.verify_evidence({"BTC": bull}, {}, _state())
     assert len(verified["BTC"]["bull_case"]) == 1
-    bad = [_ev(domain="fundamental_data", field="tvl.value", value="1007.0001")]
+    bad = [
+        _ev(domain="fundamental_data", field="tvl.value", value="1008")
+    ]  # 绝对差 1.0，超 0.05 容差
     verified, rejected = ev.verify_evidence({"BTC": bad}, {}, _state())
     assert verified["BTC"]["bull_case"] == []
     assert rejected["BTC"][0]["reason"].startswith("值不一致")
+
+
+def test_verify_numeric_render_tolerance() -> None:
+    """渲染精度容差（06 票）：LLM 引用摘要渲染值（2 位小数等）允许小误差，防误剔。"""
+    bull = [_ev(domain="fundamental_data", field="tvl.value", value="1007.001")]
+    verified, rejected = ev.verify_evidence({"BTC": bull}, {}, _state())
+    assert len(verified["BTC"]["bull_case"]) == 1
+    assert rejected == {}
+
+
+def test_verify_percent_suffix_tolerated() -> None:
+    """% 后缀宽容（06 票）：摘要把百分比渲染成 6.62%，LLM 逐字引用带 %，比较前剥离。"""
+    bull = [_ev(value="6.25%")]
+    verified, rejected = ev.verify_evidence({"BTC": bull}, {}, _state())
+    assert len(verified["BTC"]["bull_case"]) == 1
+    assert rejected == {}
+    bad = [_ev(value="6.40%")]  # 剥 % 后差 0.15，超 0.05 容差 → 剔除
+    verified, rejected = ev.verify_evidence({"BTC": bad}, {}, _state())
+    assert verified["BTC"]["bull_case"] == []
+    assert rejected["BTC"][0]["reason"].startswith("值不一致")
+
+
+def test_verify_legacy_field_prefix_stripped() -> None:
+    """旧域前缀宽容（06 票）：sentiment.momentum.value → 剥首段重试后通过。"""
+    bull = [_ev(field="sentiment.momentum.value")]
+    verified, rejected = ev.verify_evidence({"BTC": bull}, {}, _state())
+    assert len(verified["BTC"]["bull_case"]) == 1
+    assert rejected == {}
+
+
+def test_verify_legacy_prefix_still_missing_rejected() -> None:
+    """旧前缀剥离后仍不存在的路径：照剔（divergence.divergence_7d 是 LLM 幻觉字段）。"""
+    bull = [_ev(field="divergence.divergence_7d")]
+    verified, rejected = ev.verify_evidence({"BTC": bull}, {}, _state())
+    assert verified["BTC"]["bull_case"] == []
+    assert rejected["BTC"][0]["reason"].startswith("字段不存在")
+
+
+def test_verify_list_index_path() -> None:
+    """列表索引段（06 票）：items[0].title 解引用 web_data 新闻标题。"""
+    st = _state()
+    st["web_data"] = {
+        "BTC": {"items": [{"title": "x", "date": "2026-08-01", "source": "s"}]}
+    }
+    bull = [_ev(domain="web_data", field="items[0].title", value="x")]
+    verified, rejected = ev.verify_evidence({"BTC": bull}, {}, st)
+    assert len(verified["BTC"]["bull_case"]) == 1
+    assert rejected == {}
+    bad = [_ev(domain="web_data", field="items[5].title", value="x")]  # 越界
+    verified, rejected = ev.verify_evidence({"BTC": bad}, {}, st)
+    assert verified["BTC"]["bull_case"] == []
+    assert rejected["BTC"][0]["reason"].startswith("字段不存在")
+
+
+def test_verify_wrapped_value_drilldown() -> None:
+    """数据点包装自动下钻（06 票）：field 漏 .value 后缀（momentum）仍可核验通过。"""
+    bull = [_ev(field="momentum", value="6.25")]
+    verified, rejected = ev.verify_evidence({"BTC": bull}, {}, _state())
+    assert len(verified["BTC"]["bull_case"]) == 1
+    assert rejected == {}
 
 
 def test_verify_none_value_rejected() -> None:
@@ -162,6 +229,122 @@ def test_verify_scanner_snapshot_domain() -> None:
     verified, rejected = ev.verify_evidence({"BTC": bull}, {}, _state())
     assert len(verified["BTC"]["bull_case"]) == 1
     assert rejected == {}
+
+
+def test_verify_claim_invented_number_rejected() -> None:
+    """claim 含输入中不存在的数值（编造，如 99.99）：剔除留痕（07 票弱检查）。"""
+    bull = [_ev(claim="7日涨幅达 99.99%，强势")]
+    verified, rejected = ev.verify_evidence({"BTC": bull}, {}, _state())
+    assert verified["BTC"]["bull_case"] == []
+    assert rejected["BTC"][0]["reason"] == "claim 含输入中不存在的数值: 99.99"
+
+
+def test_verify_claim_visible_number_passed() -> None:
+    """claim 数值来自输入（渲染精度截断/整数等价）：通过不剔除。"""
+    bull = [
+        _ev(claim="动量分 6.25 处于增长区"),
+        _ev(
+            claim="价格 70000.0 美元",
+            domain="market_data",
+            field="price.value",
+            value="70000.0",
+        ),  # 摘要渲染 70000.00 → 数值近似
+        _ev(
+            claim="过去24小时 OI 无增量",
+            domain="microstructure_data",
+            field="oi_change_24h.value",
+            value="0.0",
+        ),  # 24 命中路径数字
+    ]
+    verified, rejected = ev.verify_evidence({"BTC": bull}, {}, _state())
+    assert len(verified["BTC"]["bull_case"]) == 3
+    assert rejected == {}
+
+
+def test_verify_claim_negative_number_passed() -> None:
+    """claim 负数值（含 % 后缀）来自输入：通过（-11.95 vs 摘要 -11.95）。"""
+    st = _state()
+    st["signals"]["BTC"]["divergence"]["value"]["divergence_7d"] = -11.95
+    bull = [
+        _ev(
+            claim="7日背离 -11.95%，动能减弱",
+            field="divergence.value.divergence_7d",
+            value="-11.95",
+        )
+    ]
+    verified, rejected = ev.verify_evidence({"BTC": bull}, {}, st)
+    assert len(verified["BTC"]["bull_case"]) == 1
+    assert rejected == {}
+    bad = [
+        _ev(
+            claim="7日背离 -88.88%，动能减弱",
+            field="divergence.value.divergence_7d",
+            value="-11.95",
+        )
+    ]
+    verified, rejected = ev.verify_evidence({"BTC": bad}, {}, st)
+    assert verified["BTC"]["bull_case"] == []
+    assert rejected["BTC"][0]["reason"].startswith("claim 含输入中不存在的数值")
+
+
+def test_verify_claim_formatted_number_passed() -> None:
+    """claim 数值格式宽容（07 票）：千分位逗号 / 负值绝对值表述 / 单位换算。"""
+    st = _state()
+    st["market_data"]["BTC"]["change_24h"] = {"value": -15.59}
+    bull = [
+        _ev(
+            claim="TVL 达 1,007.00 美元，资金充裕",
+            domain="fundamental_data",
+            field="tvl.value",
+            value="1007.0",
+        ),  # 千分位：1,007.00 ↔ 1007.0
+        _ev(
+            claim="24小时下跌 15.59%",
+            domain="market_data",
+            field="change_24h.value",
+            value="-15.59",
+        ),  # 负值绝对值表述：15.59 ↔ -15.59
+        _ev(
+            claim="市值约 7,000.0 万",
+            domain="market_data",
+            field="price.value",
+            value="70000.0",
+        ),  # 单位换算：70000 × 10⁻¹
+    ]
+    verified, rejected = ev.verify_evidence({"BTC": bull}, {}, st)
+    assert len(verified["BTC"]["bull_case"]) == 3
+    assert rejected == {}
+
+
+def test_verify_duplicate_claim_rejected() -> None:
+    """同一事实拆条凑数（claim 相同）：第二条剔除留痕（07 票）。"""
+    st = _state()
+    st["signals"]["BTC"]["divergence"]["value"]["divergence_7d"] = 34.57
+    claim = "30日背离 34.57 处于正向象限，估值偏低"
+    bull = [
+        _ev(claim=claim, field="divergence.value.divergence_7d", value="34.57"),
+        _ev(
+            claim=claim, field="divergence.value.divergence_7d", value="34.57"
+        ),  # 同 claim 重复
+    ]
+    verified, rejected = ev.verify_evidence({"BTC": bull}, {}, st)
+    assert len(verified["BTC"]["bull_case"]) == 1
+    assert rejected["BTC"] == [
+        {"claim": claim, "reason": "重复 claim（同一事实拆条凑数）"}
+    ]
+
+
+def test_verify_duplicate_claim_whitespace_insensitive() -> None:
+    """claim 仅空白/标点差异视为同一事实：去重；不同事实保留。"""
+    bull = [
+        _ev(claim="动量分 6.25 处于增长区"),
+        _ev(claim="动量分6.25处于增长区"),  # 去空白后与前一条相同
+        _ev(claim="TVL 稳步增长"),
+    ]
+    verified, rejected = ev.verify_evidence({"BTC": bull}, {}, _state())
+    assert len(verified["BTC"]["bull_case"]) == 2
+    assert len(rejected["BTC"]) == 1
+    assert rejected["BTC"][0]["reason"].startswith("重复 claim")
 
 
 def test_verify_empty_and_missing() -> None:
@@ -223,24 +406,40 @@ def test_branch_bad_items_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
         "evidence": [
             {
                 "claim": "好条目",
-                "basis": {"domain": "signals", "field": "momentum.value", "value": "6.25"},
+                "basis": {
+                    "domain": "signals",
+                    "field": "momentum.value",
+                    "value": "6.25",
+                },
                 "source": "signals",
             },
             {
                 "claim": "",
-                "basis": {"domain": "signals", "field": "momentum.value", "value": "6.25"},
+                "basis": {
+                    "domain": "signals",
+                    "field": "momentum.value",
+                    "value": "6.25",
+                },
                 "source": "signals",
             },
             {
                 "claim": "无 source",
-                "basis": {"domain": "signals", "field": "momentum.value", "value": "6.25"},
+                "basis": {
+                    "domain": "signals",
+                    "field": "momentum.value",
+                    "value": "6.25",
+                },
                 "source": "",
             },
         ]
         + [
             {
                 "claim": f"第 {i} 条",
-                "basis": {"domain": "signals", "field": "momentum.value", "value": "6.25"},
+                "basis": {
+                    "domain": "signals",
+                    "field": "momentum.value",
+                    "value": "6.25",
+                },
                 "source": "signals",
             }
             for i in range(10)
@@ -257,6 +456,7 @@ def test_branch_bad_items_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_branch_single_token_error_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     """分支异常：该 token 产出空清单 + 错误留痕（独占字段，不中断批）。"""
+
     def boom(*a, **k):
         raise RuntimeError("注入失败")
 

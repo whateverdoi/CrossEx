@@ -33,7 +33,6 @@ def _dp(value: Any, source: str) -> dict:
     }
 
 
-
 def _find(rows: list[dict] | None, symbol: str) -> dict | None:
     """共享全量列表中按 symbol 取行。"""
     if not rows:
@@ -42,7 +41,6 @@ def _find(rows: list[dict] | None, symbol: str) -> dict | None:
         if r.get("symbol") == symbol:
             return r
     return None
-
 
 
 def _latest(rows: list[dict] | None, key: str) -> float | None:
@@ -128,6 +126,7 @@ def _load_shared(tokens: list[str]) -> dict:
         "listing": binance_futures.fetch_listing_days(),
         "premium": binance_futures.fetch_premium_index_all(),
         "fapi_prices": binance_futures.fetch_fapi_prices_all(),
+        "fapi_tickers": binance_futures.fetch_fapi_ticker_24h_all(),
         "chains": defillama.fetch_chains(),
         "protocols": protocols,
         "slug_map": slug_map,
@@ -233,30 +232,31 @@ def _fund(symbol: str, shared: dict) -> dict:
 
 
 def _market(symbol: str, shared: dict) -> dict:
-    """市场快照：现货 ticker + klines 窗口 + 衍生品（futures_error 独立）。"""
+    """市场快照（06 票：主源切合约——价格/涨跌/成交额原生取 fapi，
+    现货 ticker 仅作 basis 溢价对照，现货缺失不影响主数据）。"""
     exch = binance.pair_symbol(symbol)
     mkt: dict[str, Any] = {"error": None, "futures_error": None, "incomplete": False}
     errors: list[str] = []
-    ticker = _find(shared["tickers"], exch)
-    if ticker is None:
-        errors.append("ticker 缺失")
-    mkt["price"] = _dp(ticker.get("price") if ticker else None, "binance")
+    ft = (shared.get("fapi_tickers") or {}).get(exch)
+    if ft is None:
+        errors.append("fapi ticker 缺失")
+    mkt["price"] = _dp(ft.get("price") if ft else None, "binance_futures")
     mkt["change_24h"] = _dp(
-        ticker.get("price_change_pct") if ticker else None, "binance"
+        ft.get("price_change_pct") if ft else None, "binance_futures"
     )
     mkt["quote_volume_24h"] = _dp(
-        ticker.get("quote_volume") if ticker else None, "binance"
+        ft.get("quote_volume") if ft else None, "binance_futures"
     )
-    klines = binance.fetch_klines(exch, interval="1d", limit=400)
+    klines = binance_futures.fetch_fapi_klines(exch, interval="1d", limit=400)
     if klines is None:
-        errors.append("klines 拉取失败")
+        errors.append("fapi klines 拉取失败")
     for days, key in (
         (7, "change_7d"),
         (30, "change_30d"),
         (90, "change_90d"),
         (365, "change_1y"),
     ):
-        mkt[key] = _dp(binance.trailing_return(klines, days), "binance")
+        mkt[key] = _dp(binance.trailing_return(klines, days), "binance_futures")
     mkt["listing_days"] = _dp((shared["listing"] or {}).get(exch), "binance_futures")
 
     # 衍生品（并入 market 快照，futures_error 独立标记）
@@ -279,9 +279,11 @@ def _market(symbol: str, shared: dict) -> dict:
     if oi_row is None:
         f_err.append("openInterest 缺失")
     fapi = (shared["fapi_prices"] or {}).get(exch)
-    spot = ticker.get("price") if ticker else None
+    spot = _find(shared["tickers"], exch)  # 现货仅 basis 对照，缺失不报错
+    spot_price = spot.get("price") if spot else None
     mkt["basis"] = _dp(
-        ((fapi / spot - 1.0) * 100.0) if fapi and spot else None, "binance_futures"
+        ((fapi / spot_price - 1.0) * 100.0) if fapi and spot_price else None,
+        "binance_futures",
     )
     if fapi is None:
         f_err.append("fapi price 缺失")
@@ -301,7 +303,9 @@ def _market(symbol: str, shared: dict) -> dict:
     return mkt, taker
 
 
-def _microstructure(symbol: str, taker: list[dict] | None, price_ret_24h: float | None) -> dict:
+def _microstructure(
+    symbol: str, taker: list[dict] | None, price_ret_24h: float | None
+) -> dict:
     """微观结构装配：OI 变化 / 多空比 / taker 比（board PoC 阶段 None）。"""
     exch = binance.pair_symbol(symbol)
     ms: dict[str, Any] = {"board": None, "error": None, "incomplete": False}
@@ -548,7 +552,9 @@ def compute_signals(state: dict) -> dict:
     return {"signals": signals_out, "meta": meta}
 
 
-def _invoke_branch(symbol: str, state: dict, side: str) -> tuple[list[dict], str | None]:
+def _invoke_branch(
+    symbol: str, state: dict, side: str
+) -> tuple[list[dict], str | None]:
     """分支单 token 证据提取（02 票）：json_mode 单次调用 + 宽容解析。
 
     坏条目（claim/source 空）丢弃在装配层；上限 8 条截断（BranchOutput 契约）；

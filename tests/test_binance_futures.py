@@ -45,6 +45,25 @@ def test_mock_point_and_all_endpoints() -> None:
     assert futures.fetch_open_interest(SYM) == {"symbol": SYM, "open_interest": 12345.6}
 
 
+def test_mock_fapi_ticker_24h_all() -> None:
+    """全量合约 24hr ticker（市场主源）：symbol 带后缀，price/pct/quote_volume 数值化。"""
+    rows = futures.fetch_fapi_ticker_24h_all()
+    assert isinstance(rows, dict)
+    assert set(rows) == {s + "USDT" for s in MOCK_TOKENS}
+    for row in rows.values():
+        assert set(row) == {"price", "price_change_pct", "quote_volume"}
+        assert all(isinstance(v, (int, float)) for v in row.values())
+
+
+def test_mock_fapi_klines() -> None:
+    """合约日线窗口：与现货 mock 同构（open_time 毫秒 + close_price）。"""
+    rows = futures.fetch_fapi_klines(SYM, "1d", 400)
+    assert isinstance(rows, list) and len(rows) == 400
+    assert set(rows[0]) == {"open_time", "close_price"}
+    assert isinstance(rows[0]["open_time"], int)
+    assert isinstance(rows[0]["close_price"], float)
+
+
 def test_mock_series_shapes() -> None:
     """mock 序列形状：OI 历史/多空比/taker/资金费率时间序列字段齐备。"""
     rows = futures.fetch_open_interest_hist(SYM)

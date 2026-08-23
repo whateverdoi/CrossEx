@@ -14,7 +14,12 @@ from strategy_research import context
 
 def _dp(value):
     """四元组包装（与 nodes._dp 同构）。"""
-    return {"value": value, "source": "mock", "timestamp": "2026-08-20", "confidence": 1.0}
+    return {
+        "value": value,
+        "source": "mock",
+        "timestamp": "2026-08-20",
+        "confidence": 1.0,
+    }
 
 
 def _state_with(symbol="BTC"):
@@ -74,7 +79,11 @@ def _state_with(symbol="BTC"):
                 "valuation": {"value": {"mc_fees": 13.7, "fees_tvl": 0.036}},
                 "momentum": {"value": 21.25},
                 "divergence": {
-                    "value": {"divergence_7d": 4.5, "divergence_30d": 9.0, "quadrant": "I"}
+                    "value": {
+                        "divergence_7d": 4.5,
+                        "divergence_30d": 9.0,
+                        "quadrant": "I",
+                    }
                 },
                 "sentiment": {
                     "components": {
@@ -123,7 +132,7 @@ class TestBranchSummaryContract:
     def test_branch_summary_is_deterministic_snapshot(self):
         """分支摘要 = 纯确定性快照：信号节 + 指令行，无任何决策链产物。"""
         summary = context.build_branch_summary("BTC", _state_with())
-        assert "== 信号（确定性计算）==" in summary
+        assert "== 信号（signals）==" in summary
         assert "只提取证据，禁止结论。" in summary
         assert "原决策" not in summary
         assert "校准基线" not in summary

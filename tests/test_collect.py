@@ -31,6 +31,14 @@ _PATCH_TARGETS: dict[str, tuple[str, object]] = {
         "strategy_research.nodes.binance_futures.fetch_fapi_prices_all",
         m.mock_fapi_prices_all,
     ),
+    "fetch_fapi_ticker_24h_all": (
+        "strategy_research.nodes.binance_futures.fetch_fapi_ticker_24h_all",
+        m.mock_fapi_ticker_24h_all,
+    ),
+    "fetch_fapi_klines": (
+        "strategy_research.nodes.binance_futures.fetch_fapi_klines",
+        m.mock_fapi_klines,
+    ),
     "fetch_funding_rate_history": (
         "strategy_research.nodes.binance_futures.fetch_funding_rate_history",
         m.mock_funding_rate_history,
@@ -102,6 +110,7 @@ _SHARED_NAMES = [
     "fetch_listing_days",
     "fetch_premium_index_all",
     "fetch_fapi_prices_all",
+    "fetch_fapi_ticker_24h_all",
     "fetch_chains",
     "fetch_protocols",
     "fetch_fees",
@@ -166,10 +175,12 @@ def test_mock_collect_full_snapshot() -> None:
     }
     assert set(mkt["price"]) == {"value", "source", "timestamp", "confidence"}
     assert mkt["price"]["value"] == 70000.0
-    assert mkt["price"]["source"] == "binance"
+    assert mkt["price"]["source"] == "binance_futures"
     assert mkt["basis"]["value"] == 0.0  # fapi 价 == 现货价
     assert mkt["funding_trend"]["value"] in ("rising", "falling", "flat")
-    assert mkt["funding_pctile_90d"]["value"] == 20.0  # mock 费率 5 档周期，最新为最低档
+    assert (
+        mkt["funding_pctile_90d"]["value"] == 20.0
+    )  # mock 费率 5 档周期，最新为最低档
     assert mkt["incomplete"] is False
 
     fund = res["fundamental_data"]["UNI"]
@@ -227,7 +238,7 @@ def test_mock_shared_fetched_once(monkeypatch: pytest.MonkeyPatch) -> None:
         path, fn = _PATCH_TARGETS[name]
         counters[name] = _count(monkeypatch, path, fn)
     for name in (
-        "fetch_klines",
+        "fetch_fapi_klines",
         "fetch_funding_rate_history",
         "fetch_open_interest",
         "fetch_open_interest_hist",
@@ -254,7 +265,7 @@ def test_mock_shared_fetched_once(monkeypatch: pytest.MonkeyPatch) -> None:
             f"{name} 应批内一次，实际 {counters[name]['n']}"
         )
     for name in (
-        "fetch_klines",
+        "fetch_fapi_klines",
         "fetch_funding_rate_history",
         "fetch_open_interest",
         "fetch_open_interest_hist",
@@ -278,14 +289,16 @@ def test_mock_shared_fetched_once(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_failure_marks_unknown_not_abort(monkeypatch: pytest.MonkeyPatch) -> None:
     """失败语义：单 token 异常仅标 error 批不中断；共享失败 → 数据点 UNKNOWN，批不中断。"""
-    orig = nodes.binance.fetch_klines
+    orig = nodes.binance_futures.fetch_fapi_klines
 
     def boom(symbol: str, **kwargs):
         if symbol == "XRPUSDT":
             raise RuntimeError("注入失败")
         return orig(symbol, **kwargs)
 
-    monkeypatch.setattr("strategy_research.nodes.binance.fetch_klines", boom)
+    monkeypatch.setattr(
+        "strategy_research.nodes.binance_futures.fetch_fapi_klines", boom
+    )
     res = nodes.collect_data({"tokens": list(MOCK_TOKENS)})
 
     assert set(res["market_data"]) == set(MOCK_TOKENS)  # 批不中断
@@ -300,7 +313,7 @@ def test_failure_marks_unknown_not_abort(monkeypatch: pytest.MonkeyPatch) -> Non
     _patch_fetches(
         monkeypatch,
         {
-            "fetch_ticker_24h_all": None,
+            "fetch_fapi_ticker_24h_all": None,
             "fetch_premium_index_all": None,
             "fetch_chain_tvl": None,
         },
@@ -308,7 +321,7 @@ def test_failure_marks_unknown_not_abort(monkeypatch: pytest.MonkeyPatch) -> Non
     res = nodes.collect_data({"tokens": list(MOCK_TOKENS)})
     assert set(res["market_data"]) == set(MOCK_TOKENS)  # 批不中断
     mkt = res["market_data"]["BTC"]
-    assert mkt["error"] == "ticker 缺失"
+    assert mkt["error"] == "fapi ticker 缺失"
     assert mkt["price"]["value"] is None
     assert mkt["futures_error"] == "premium 缺失"
     assert mkt["incomplete"] is True
@@ -331,7 +344,7 @@ def test_real_path_maps_fields_and_unknown_kind(
     res = nodes.collect_data({"tokens": list(MOCK_TOKENS)})
 
     mkt = res["market_data"]["BTC"]
-    assert mkt["price"]["source"] == "binance"
+    assert mkt["price"]["source"] == "binance_futures"
     assert mkt["price"]["value"] == 70000.0
     assert mkt["change_7d"]["value"] == 0.0  # mock klines 周期 7 天同相
     assert mkt["funding"]["source"] == "binance_futures"
@@ -355,7 +368,7 @@ def test_real_path_maps_fields_and_unknown_kind(
     assert fund["tvl_trend_30d"]["value"] == "rising"
     assert fund["fees_trend_30d"]["value"] == "flat"
     assert res["fundamental_data"]["BTC"]["stablecoin_change_30d"]["value"] == 0.0
-    
+
     # 静态映射未命中 + 惰性兜底失败 → kind=unknown
     _patch_fetches(monkeypatch, {"fetch_protocols": None})
     res_zzz = nodes.collect_data({"tokens": ["ZZZ"]})

@@ -13,6 +13,7 @@ model_validate 永不抛异常（坏条目丢弃在节点装配层做）。
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from pydantic import BaseModel, Field, model_validator
@@ -28,6 +29,19 @@ _DOMAIN_KEYS = (
 )
 
 _NULLISH = {"", "null", "none", "nan", "nil", "-"}
+
+#: field 旧域前缀（06 票宽容：LLM 曾用旧数据源名当 field 首段，如
+#: sentiment.funding_pctile_90d；核验解引用失败时剥首段重试一次）
+_LEGACY_FIELD_PREFIXES = (
+    "sentiment",
+    "valuation",
+    "divergence",
+    "market",
+    "defillama",
+    "binance_futures",
+    "binance",
+    "fundamental",
+)
 
 
 def _text(value: Any) -> str:
@@ -102,9 +116,23 @@ _MISSING = object()
 
 
 def _resolve(root: dict, path: str) -> Any:
-    """点号路径逐级解引用；任一级缺失/非 dict → _MISSING。"""
+    """点号路径逐级解引用；任一级缺失/非 dict → _MISSING。
+
+    支持列表索引段（06 票）：items[0].title → items[0]["title"]（web_data 新闻）。
+    """
     node: Any = root
     for part in path.split("."):
+        if "[" in part and part.endswith("]"):
+            key, _, idx = part.partition("[")
+            idx = idx.rstrip("]")
+            if not key:
+                return _MISSING
+            node = node.get(key) if isinstance(node, dict) else _MISSING
+            try:
+                node = node[int(idx)] if isinstance(node, list) else _MISSING
+            except (IndexError, ValueError, TypeError):
+                return _MISSING
+            continue
         if not isinstance(node, dict) or part not in node:
             return _MISSING
         node = node[part]
@@ -115,37 +143,91 @@ def _values_match(actual: Any, expected: str) -> bool:
     """快照值 vs 引用值（字符串）规范化比较：数值近似 / 其余严格相等。
 
     None（UNKNOWN 纪律）不可作为证据引用，一律不匹配。
+    数值容差（06 票）：固定绝对 0.05——LLM 引用值来自摘要渲染（最长 1 位小数，
+    最坏舍入 0.05），允许渲染精度误差；不用相对容差，防止 0.1% 量级的错值被放行。
     """
     if actual is None:
         return False
     if isinstance(actual, bool):
         return str(actual) == expected
     if isinstance(actual, (int, float)):
+        exp = expected.rstrip("%").strip()  # 百分比字段摘要把值渲染成 6.62%，
+        # LLM 按逐字契约引用带 % 后缀——比较前剥离（06 票）
         try:
-            exp = float(expected)
+            expected_num = float(exp)
         except (TypeError, ValueError):
             return False
-        return abs(float(actual) - exp) <= 1e-9 * max(1.0, abs(exp))
+        return abs(float(actual) - expected_num) <= max(1e-6, 0.05)
     return str(actual) == expected
 
 
-def _verify_item(item: dict, symbol: str, state: dict) -> tuple[dict | None, dict | None]:
+def _claim_unknown_numbers(
+    claim: str, symbol: str, state: dict, visible: str
+) -> list[str]:
+    """claim 中在分支摘要（LLM 可见文本）不存在的数值（07 票弱检查）。
+
+    摘要与分支 LLM 所见完全同源（context.build_branch_summary）；claim 每个
+    数值必须与摘要中任一数值在数量级上对应，否则视为编造剔除。匹配宽容：
+    千分位逗号（309,759,196.53）、负值字段的绝对值表述（下跌 15.59% ↔ 快照
+    -15.59）、单位换算（39.9 亿 ↔ 3994766092.68，10^k 缩放）。只抓数字真实
+    性，不判归属——归属错误（借其他字段数值）靠 prompt 纪律，核验无语义能力。
+    """
+    if not claim:
+        return []
+    hay = [float(m) for m in re.findall(r"-?\d+(?:\.\d+)?", visible.replace(",", ""))]
+    missing: list[str] = []
+    for num in re.findall(r"-?\d+(?:\.\d+)?", claim.replace(",", "")):
+        try:
+            v = abs(float(num))
+        except ValueError:
+            continue
+        if not any(
+            abs(abs(h) * (10**k) - v) <= max(1e-6, 0.05)
+            for h in hay
+            for k in range(-9, 1)  # 只允许缩小（亿/万/千分位换算），禁止放大——
+            # 放大会把编造值放行（99.99 ≈ 1.0×10²）
+        ):
+            missing.append(num)
+    return missing
+
+
+def _verify_item(
+    item: dict, symbol: str, state: dict, visible: str
+) -> tuple[dict | None, dict | None]:
     """单条证据核验：通过 → (item, None)；剔除 → (None, {claim, reason})。"""
     basis = item.get("basis") or {}
     domain = _text(basis.get("domain"))
     field = _text(basis.get("field"))
     expected = _text(basis.get("value"))
     if domain == "scanner_snapshot":  # field 自带完整路径（market.BTC.price）
-        root: Any = (state.get("scanner_snapshot") or {})
+        root: Any = state.get("scanner_snapshot") or {}
     elif domain in _DOMAIN_KEYS:
-        root = ((state.get(domain) or {}).get(symbol) or {})
+        root = (state.get(domain) or {}).get(symbol) or {}
     else:
-        return None, {"claim": item.get("claim") or "", "reason": f"basis 数据域未知: {domain}"}
+        return None, {
+            "claim": item.get("claim") or "",
+            "reason": f"basis 数据域未知: {domain}",
+        }
     if not field:
         return None, {"claim": item.get("claim") or "", "reason": "basis 字段路径为空"}
     actual = _resolve(root, field)
+    if (
+        actual is _MISSING
+        and "." in field
+        and field.split(".", 1)[0] in _LEGACY_FIELD_PREFIXES
+    ):
+        # 旧域前缀宽容（06 票）：sentiment.funding_pctile_90d → 剥首段重试
+        field = field.split(".", 1)[1]
+        actual = _resolve(root, field)
     if actual is _MISSING:
-        return None, {"claim": item.get("claim") or "", "reason": f"字段不存在: {field}"}
+        return None, {
+            "claim": item.get("claim") or "",
+            "reason": f"字段不存在: {field}",
+        }
+    if isinstance(actual, dict) and "value" in actual:
+        # 数据点包装（{value, source, timestamp, confidence}）自动下钻 value：
+        # 宽容 field 漏 .value 后缀（LLM 弱契约，宽容纪律）
+        actual = actual["value"]
     if not _values_match(actual, expected):
         return (
             None,
@@ -154,15 +236,37 @@ def _verify_item(item: dict, symbol: str, state: dict) -> tuple[dict | None, dic
                 "reason": f"值不一致: 引用 {expected or '空'} vs 快照 {actual}",
             },
         )
+    missing = _claim_unknown_numbers(item.get("claim") or "", symbol, state, visible)
+    if missing:
+        return None, {
+            "claim": item.get("claim") or "",
+            "reason": f"claim 含输入中不存在的数值: {', '.join(missing)}",
+        }
     return item, None
 
 
-def _verify_list(items: list[dict] | None, symbol: str, state: dict) -> tuple[list[dict], list[dict]]:
+def _verify_list(
+    items: list[dict] | None, symbol: str, state: dict
+) -> tuple[list[dict], list[dict]]:
     """单分支证据清单核验：返回（通过清单, 剔除记录）。"""
+    from strategy_research import context  # 局部导入避免模块初始化顺序耦合
+
+    # 弱检查的合法数值源 = 分支摘要（与 LLM 所见同源），每 token 构建一次
+    visible = context.build_branch_summary(symbol, state)
     ok: list[dict] = []
     rej: list[dict] = []
+    seen: set[str] = set()  # 07 票：claim 规范化去重（防同一事实拆条凑数）
     for item in items or []:
-        passed, rejected = _verify_item(item, symbol, state)
+        passed, rejected = _verify_item(item, symbol, state, visible)
+        if passed is not None:
+            norm = "".join((passed.get("claim") or "").split())
+            if norm in seen:
+                passed, rejected = None, {
+                    "claim": item.get("claim") or "",
+                    "reason": "重复 claim（同一事实拆条凑数）",
+                }
+            else:
+                seen.add(norm)
         if passed is not None:
             ok.append(passed)
         if rejected is not None:
@@ -184,8 +288,12 @@ def verify_evidence(
     verified: dict[str, dict] = {}
     rejected: dict[str, list[dict]] = {}
     for symbol in sorted(set(bull_evidence or {}) | set(bear_evidence or {})):
-        bull_ok, bull_rej = _verify_list((bull_evidence or {}).get(symbol), symbol, state)
-        bear_ok, bear_rej = _verify_list((bear_evidence or {}).get(symbol), symbol, state)
+        bull_ok, bull_rej = _verify_list(
+            (bull_evidence or {}).get(symbol), symbol, state
+        )
+        bear_ok, bear_rej = _verify_list(
+            (bear_evidence or {}).get(symbol), symbol, state
+        )
         verified[symbol] = {"bull_case": bull_ok, "bear_case": bear_ok}
         if bull_rej or bear_rej:
             rejected[symbol] = bull_rej + bear_rej

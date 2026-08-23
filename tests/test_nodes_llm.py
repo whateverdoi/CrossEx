@@ -133,20 +133,24 @@ def scanned_full_result(tmp_path_factory):
 
 
 def test_facts_summary_scanner_section():
-    """验收：摘要含扫描器快照节（scan_ 前缀与口径标注）；快照缺失 → 无该节。"""
+    """验收：摘要含扫描器快照节（完整路径 market.{SYMBOL}.xxx 与口径标注）；
+    快照缺失 → 无该节。"""
     state = {"tokens": ["AKEUSDT"], "signals": {}, "scanner_snapshot": _SNAP_STATE}
     summary = "\n".join(context._facts_summary_lines("AKEUSDT", state))
-    assert "== 扫描器快照（BinanceApi）==" in summary
-    assert "scan_price: 0.009465" in summary
-    assert "scan_ret_1h: 3.94%" in summary
-    assert "scan_ret_24h: -10.32%" in summary
-    assert "scan_ret_24h_official: -8.67%" in summary
-    assert "scan_futures_premium_pct: 0.15%" in summary
-    assert "scan_onboard_date: 2025-09-26" in summary
-    assert "scan_boards: gain_1h、loss_24h、gain_7d" in summary
-    assert "scan_ls_ratio_all: 0.52" in summary
-    assert "scan_funding_avg_7d: 0.000079" in summary
-    assert "scan_funding_trend: flat" in summary
+    assert (
+        "== 扫描器快照（scanner_snapshot，截至 2026-08-16，field 直接抄写下方完整路径）=="
+        in summary
+    )
+    assert "market.AKEUSDT.price: 0.009465" in summary
+    assert "market.AKEUSDT.ret_1h: 3.94%" in summary
+    assert "market.AKEUSDT.ret_24h: -10.32%" in summary
+    assert "market.AKEUSDT.price_change_pct_24h: -8.67%" in summary
+    assert "market.AKEUSDT.futures_premium_pct: 0.15%" in summary
+    assert "market.AKEUSDT.onboard_date: 2025-09-26" in summary
+    assert "market.AKEUSDT.boards: gain_1h、loss_24h、gain_7d" in summary
+    assert "microstructure.AKEUSDT.ls_ratio_all: 0.52" in summary
+    assert "microstructure.AKEUSDT.funding_avg: 0.000079" in summary
+    assert "microstructure.AKEUSDT.funding_trend: flat" in summary
 
     no_snap = {"tokens": ["BTC"], "signals": {}}
     no_text = "\n".join(context._facts_summary_lines("BTC", no_snap))

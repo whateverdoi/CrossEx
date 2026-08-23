@@ -292,6 +292,76 @@ def fetch_fapi_prices_all() -> dict[str, float] | None:
     return prices
 
 
+def fetch_fapi_ticker_24h_all() -> dict[str, dict] | None:
+    """全量合约 24hr ticker（fapi/v1/ticker/24hr，权重 40，批内一次）。
+
+    返回 ``{symbol: {price, price_change_pct, quote_volume}}``（数值化）；
+    失败返回 ``None``。市场数据主源（06 票：原生合约数据，非现货兜底）。
+    """
+    if env.is_mock_mode():
+        return mock.mock_fapi_ticker_24h_all()
+    client = _binance_sdk.get_futures_data_client()
+    try:
+        data = _binance_sdk.sync_call_with_rate_limit(
+            client.ticker24hr_price_change_statistics,
+            name="ticker/24hr(fapi)",
+            weight=40,
+        )
+    except Exception:
+        return None
+    if not isinstance(data, list):
+        return None
+    rows: dict[str, dict] = {}
+    for t in data:
+        symbol = t.get("symbol")
+        if not symbol:
+            continue
+        rows[symbol] = {
+            "price": _float_or_none(t.get("lastPrice")),
+            "price_change_pct": _float_or_none(t.get("priceChangePercent")),
+            "quote_volume": _float_or_none(t.get("quoteVolume")),
+        }
+    return rows
+
+
+def fetch_fapi_klines(
+    symbol: str, interval: str = "1d", limit: int = 365
+) -> list[dict] | None:
+    """合约日线窗口（fapi/v1/klines，与现货 fetch_klines 同构）：
+    ``[{open_time, close_price}]``（供 ret_7d/30d/90d/1y）。
+
+    权重随 limit（≤100 时 1，≤500 时 2，更大时 5）；失败返回 ``None``。
+    """
+    if env.is_mock_mode():
+        return mock.mock_fapi_klines(symbol, interval, limit)
+    client = _binance_sdk.get_futures_data_client()
+    try:
+        data = _binance_sdk.sync_call_with_rate_limit(
+            client.kline_candlestick_data,
+            symbol=symbol,
+            interval=interval,
+            limit=limit,
+            name="klines(fapi)",
+            weight=1 if limit <= 100 else 2 if limit <= 500 else 5,
+        )
+    except Exception:
+        return None
+    if not isinstance(data, list):
+        return None
+    rows: list[dict] = []
+    for k in data:
+        try:
+            rows.append(
+                {
+                    "open_time": int(k[0]),
+                    "close_price": float(k[4]),
+                }
+            )
+        except (IndexError, KeyError, TypeError, ValueError):
+            continue
+    return rows
+
+
 def fetch_funding_rate_history(symbol: str, limit: int = 25) -> list[dict] | None:
     """资金费率历史（fapi/v1/fundingRate，权重 1）：
     ``[{funding_time, funding_rate}]`` 时间升序。"""

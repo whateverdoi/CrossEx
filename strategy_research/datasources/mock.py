@@ -123,6 +123,20 @@ def mock_fapi_prices_all() -> dict[str, float]:
     return {f"{s}USDT": _price(s) for s in MOCK_TOKENS}
 
 
+def mock_fapi_ticker_24h_all() -> dict[str, dict]:
+    """全量合约 24hr ticker（与 fetch_fapi_ticker_24h_all 同构）：
+    价格与现货 mock 同价（同构纪律），symbol 带计价后缀。"""
+    return {
+        f"{s}USDT": {"price": price, "price_change_pct": pct, "quote_volume": vol}
+        for s, (price, pct, vol) in _MOCK_MARKET.items()
+    }
+
+
+def mock_fapi_klines(symbol: str, interval: str = "1d", limit: int = 365) -> list[dict]:
+    """合约日线窗口（与 fetch_fapi_klines 同构）：与现货 mock_klines 同价同形。"""
+    return mock_klines(symbol, interval, limit)
+
+
 def mock_funding_rate_history(symbol: str, limit: int = 25) -> list[dict]:
     """资金费率历史（与 fetch_funding_rate_history 同构）：时间升序，最新在末尾。
 
@@ -377,7 +391,6 @@ def mock_web_rss(query: str) -> list[dict]:
         }
         for i in range(3)
     ]
-
 
 
 #: mock 持仓指标原始值中与序列无关的固定部分（序列派生值见 _mock_funding_trend）

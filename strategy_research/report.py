@@ -33,9 +33,7 @@ def _run_dir() -> Path:
 
 def _llm_calls() -> dict:
     """LLM 调用计数（成本统计）：mock 从假模型计数；live 从 callback 计数汇总。"""
-    counts = (
-        dict(_MOCK_CALL_COUNTS) if is_mock_mode() else dict(LIVE_CALL_COUNTS)
-    )
+    counts = dict(_MOCK_CALL_COUNTS) if is_mock_mode() else dict(LIVE_CALL_COUNTS)
     counts["total"] = sum(v for k, v in counts.items() if k != "total")
     return counts
 
@@ -130,7 +128,9 @@ def _signal_snapshot(symbol: str, state: dict) -> dict:
                 "momentum": mom if isinstance(mom, (int, float)) else None,
                 "quadrant": quad if quad in ("I", "II", "III", "IV") else None,
                 "funding_pctile_90d": pct if isinstance(pct, (int, float)) else None,
-                "oi_price_divergence": od.get("label") if isinstance(od, dict) else None,
+                "oi_price_divergence": od.get("label")
+                if isinstance(od, dict)
+                else None,
             }
         )
     fund = (state.get("fundamental_data") or {}).get(symbol) or {}
@@ -148,9 +148,11 @@ def _build_data_snapshot(state: dict) -> dict:
             "signals": (state.get("signals") or {}).get(s) or {},
             "market_data": (state.get("market_data") or {}).get(s) or {},
             "fundamental_data": (state.get("fundamental_data") or {}).get(s) or {},
-            "microstructure_data": (state.get("microstructure_data") or {}).get(s) or {},
+            "microstructure_data": (state.get("microstructure_data") or {}).get(s)
+            or {},
             "web_data": (state.get("web_data") or {}).get(s) or {},
             "scanner_snapshot": {
+                "date": scanner.get("date"),
                 "market": (scanner.get("market") or {}).get(s) or {},
                 "microstructure": (scanner.get("microstructure") or {}).get(s) or {},
             },
@@ -209,7 +211,7 @@ def _write_snapshot_and_diff(state: dict, run_ts: str, mode: str) -> dict:
 
 
 def _domains(items: list[dict]) -> list[str]:
-    """证据引用数据域（按出现顺序去重，总览表"数据域覆盖"列）。"""
+    """证据引用数据域（按出现顺序去重，总览表“数据域覆盖”列）。"""
     seen: list[str] = []
     for item in items:
         d = (item.get("basis") or {}).get("domain")
@@ -218,9 +220,23 @@ def _domains(items: list[dict]) -> list[str]:
     return seen
 
 
-def _evidence_section_lines(symbol: str, ev: dict) -> list[str]:
-    """单 token 证据节：### 做多证据 / ### 做空证据 两张表（# | claim | basis | source）。"""
+def _price_text(value) -> str:
+    """最新价格渲染（06 票：总览表核对列）：保留小价格精度、去尾零；缺失 → —。"""
+    if not isinstance(value, (int, float)):
+        return "—"
+    return f"{value:.8f}".rstrip("0").rstrip(".")
+
+
+def _evidence_section_lines(
+    symbol: str, ev: dict, scan_date: str | None = None
+) -> list[str]:
+    """单 token 证据节：### 做多证据 / ### 做空证据 两张表（# | claim | basis | source）。
+
+    scan_date：扫描器快照日期（存在时在节头标注，防旧快照被误读为实时，07 票）。
+    """
     lines = [f"## {symbol}", ""]
+    if scan_date:
+        lines += [f"- 扫描器快照日期：{scan_date}", ""]
     for title, items in (
         ("做多证据", ev.get("bull_case") or []),
         ("做空证据", ev.get("bear_case") or []),
@@ -282,17 +298,24 @@ def _render_evidence_md(state: dict, run: dict) -> str:
         "",
         "## 总览",
         "",
-        "| token | 多头证据数 | 空头证据数 | 数据域覆盖 |",
-        "|---|---|---|---|",
+        "| token | 最新价格 | 多头证据数 | 空头证据数 | 数据域覆盖 |",
+        "|---|---|---|---|---|",
     ]
     for s in state["tokens"]:
         ev = evidence.get(s) or {}
         bull = ev.get("bull_case") or []
         bear = ev.get("bear_case") or []
         domains = ", ".join(_domains(bull + bear)) or "—"
-        lines.append(f"| {s} | {len(bull)} | {len(bear)} | {domains} |")
+        price = ((state.get("market_data") or {}).get(s) or {}).get("price") or {}
+        lines.append(
+            f"| {s} | {_price_text(price.get('value'))} | {len(bull)} | {len(bear)} | {domains} |"
+        )
     lines.append("")
     for s in state["tokens"]:
-        lines += _evidence_section_lines(s, evidence.get(s) or {})
+        lines += _evidence_section_lines(
+            s,
+            evidence.get(s) or {},
+            ((state.get("scanner_snapshot") or {}).get("date")),
+        )
     lines += _rejected_lines(rejected, state["tokens"])
     return "\n".join(lines)

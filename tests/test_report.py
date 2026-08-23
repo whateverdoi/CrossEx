@@ -153,24 +153,40 @@ def _evidence_state() -> dict:
             "bull_case": [
                 {
                     "claim": "动量分 6.25 处于增长区",
-                    "basis": {"domain": "signals", "field": "momentum.value", "value": "6.25"},
+                    "basis": {
+                        "domain": "signals",
+                        "field": "momentum.value",
+                        "value": "6.25",
+                    },
                     "source": "signals",
                 },
                 {
                     "claim": "资金费率 0.01% 偏低",
-                    "basis": {"domain": "signals", "field": "sentiment.components.funding", "value": "0.0001"},
+                    "basis": {
+                        "domain": "signals",
+                        "field": "sentiment.components.funding",
+                        "value": "0.0001",
+                    },
                     "source": "signals",
                 },
                 {
                     "claim": "24h 成交额 2 亿美元",
-                    "basis": {"domain": "market_data", "field": "quote_volume_24h.value", "value": "200000000"},
+                    "basis": {
+                        "domain": "market_data",
+                        "field": "quote_volume_24h.value",
+                        "value": "200000000",
+                    },
                     "source": "market_data",
                 },
             ],
             "bear_case": [
                 {
                     "claim": "taker 买卖比 1.0 无买盘优势",
-                    "basis": {"domain": "signals", "field": "sentiment.components.taker_bs_ratio", "value": "1.0"},
+                    "basis": {
+                        "domain": "signals",
+                        "field": "sentiment.components.taker_bs_ratio",
+                        "value": "1.0",
+                    },
                     "source": "signals",
                 }
             ],
@@ -184,7 +200,10 @@ def _evidence_state() -> dict:
         ]
     }
     state["signals"] = {
-        "BTC": {"momentum": {"value": 6.25}, "divergence": {"value": {"quadrant": "III"}}},
+        "BTC": {
+            "momentum": {"value": 6.25},
+            "divergence": {"value": {"quadrant": "III"}},
+        },
         "ETH": {"error": "模拟信号层失败"},
     }
     state["fundamental_data"] = {
@@ -200,12 +219,23 @@ def _evidence_state() -> dict:
         },
     }
     state["market_data"] = {
-        "BTC": {"funding_pctile_90d": {"value": 42.0}, "quote_volume_24h": {"value": 2e8}},
+        "BTC": {
+            "price": {"value": 70000.0},
+            "funding_pctile_90d": {"value": 42.0},
+            "quote_volume_24h": {"value": 2e8},
+        },
         "ETH": {"funding_pctile_90d": {"value": None}},
     }
     state["microstructure_data"] = {
         "BTC": {"oi_price_divergence": {"value": {"label": "negative"}}},
         "ETH": {"oi_price_divergence": {"value": {}}},
+    }
+    state[
+        "scanner_snapshot"
+    ] = {  # 07 票：快照日期透传与证据节标注（防旧快照误读为实时）
+        "date": "2026-08-16",
+        "market": {"BTC": {"price": 69000.0, "ret_24h": -1.2}},
+        "microstructure": {"BTC": {"ls_ratio_all": 0.9}},
     }
     return state
 
@@ -234,18 +264,27 @@ def test_evidence_md_sections():
     assert "运行模式：`mock`" in md
     assert "tokens：BTC, ETH" in md
     assert "LLM 调用：12" in md
-    # 总览表
-    assert "| token | 多头证据数 | 空头证据数 | 数据域覆盖 |" in md
-    assert "| BTC | 3 | 1 | signals, market_data |" in md
-    assert "| ETH | 0 | 0 | — |" in md
+    # 总览表（06 票加最新价格核对列：BTC 70000，ETH 无 price → —）
+    assert "| token | 最新价格 | 多头证据数 | 空头证据数 | 数据域覆盖 |" in md
+    assert "| BTC | 70000 | 3 | 1 | signals, market_data |" in md
+    assert "| ETH | — | 0 | 0 | — |" in md
     # 每 token 节：做多/做空两张表（# | claim | basis | source）
     assert "## BTC" in md
+    assert "- 扫描器快照日期：2026-08-16" in md  # 07 票：快照日期标注
     assert "### 做多证据" in md
     assert "| # | claim | basis | source |" in md
-    assert "| 1 | 动量分 6.25 处于增长区 | signals.momentum.value = 6.25 | signals |" in md
-    assert "| 3 | 24h 成交额 2 亿美元 | market_data.quote_volume_24h.value = 200000000 | market_data |" in md
+    assert (
+        "| 1 | 动量分 6.25 处于增长区 | signals.momentum.value = 6.25 | signals |" in md
+    )
+    assert (
+        "| 3 | 24h 成交额 2 亿美元 | market_data.quote_volume_24h.value = 200000000 | market_data |"
+        in md
+    )
     assert "### 做空证据" in md
-    assert "| 1 | taker 买卖比 1.0 无买盘优势 | signals.sentiment.components.taker_bs_ratio = 1.0 | signals |" in md
+    assert (
+        "| 1 | taker 买卖比 1.0 无买盘优势 | signals.sentiment.components.taker_bs_ratio = 1.0 | signals |"
+        in md
+    )
     # 空证据占位 + 剔除附录
     assert "## ETH" in md
     assert "（无做多证据）" in md
@@ -259,7 +298,7 @@ def test_evidence_md_sections():
 def test_evidence_md_empty_state():
     """空态：无证据/无剔除 → 占位不报错，报告仍生成。"""
     md = _render_evidence(_mk_state(["BTC"]))
-    assert "| BTC | 0 | 0 | — |" in md
+    assert "| BTC | — | 0 | 0 | — |" in md
     assert "（无做多证据）" in md
     assert "（无做空证据）" in md
     assert "（本批无剔除记录）" in md
@@ -286,8 +325,15 @@ def test_signal_snapshot_build():
 
 def test_signal_diff_actions():
     """验收：diff 信号对比三 action（new/changed/unchanged）；stop_short/stop_long 退役。"""
-    base = {k: v for k, v in zip(_ALL_SIGNAL_KEYS, [6.25, "III", 42.0, "negative", "rising", "flat", 5.0])}
-    prev = {"signals": {"SAME": dict(base), "CHG": dict(base)}}  # NEW 只在 cur（prev 缺失语义）
+    base = {
+        k: v
+        for k, v in zip(
+            _ALL_SIGNAL_KEYS, [6.25, "III", 42.0, "negative", "rising", "flat", 5.0]
+        )
+    }
+    prev = {
+        "signals": {"SAME": dict(base), "CHG": dict(base)}
+    }  # NEW 只在 cur（prev 缺失语义）
     cur = {
         "signals": {
             "NEW": dict(base),
@@ -320,9 +366,17 @@ def test_run_json_evidence_and_snapshot(monkeypatch, tmp_path):
     run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
     assert run["evidence"]["BTC"]["bull_case"][0]["claim"].startswith("动量分")
     assert run["rejected_evidence"]["BTC"][0]["reason"].startswith("字段不存在")
-    assert run["data_snapshot"]["BTC"]["market_data"]["quote_volume_24h"]["value"] == 2e8
-    assert run["data_snapshot"]["BTC"]["fundamental_data"]["tvl_trend_30d"]["value"] == "rising"
+    assert (
+        run["data_snapshot"]["BTC"]["market_data"]["quote_volume_24h"]["value"] == 2e8
+    )
+    assert (
+        run["data_snapshot"]["BTC"]["fundamental_data"]["tvl_trend_30d"]["value"]
+        == "rising"
+    )
     assert run["data_snapshot"]["ETH"]["signals"]["error"] == "模拟信号层失败"
+    assert (
+        run["data_snapshot"]["BTC"]["scanner_snapshot"]["date"] == "2026-08-16"
+    )  # 07 票：快照日期透传
     assert run["signals"]["BTC"]["momentum"] == 6.25
     assert run["signals"]["BTC"]["quadrant"] == "III"
     assert run["signals"]["BTC"]["tvl_trend_30d"] == "rising"
