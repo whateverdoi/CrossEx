@@ -142,6 +142,68 @@ def test_verify_rejects_value_mismatch() -> None:
     assert rejected["BTC"][0]["reason"] == "值不一致: 引用 6.35 vs 快照 6.25"
 
 
+def test_verify_label_dict_downcast() -> None:
+    """标签型复合值（liq_imbalance: {ratio, label, note}）自动下钻 label：
+    引用 label 字符串通过；引用错误 label 剔除。"""
+    st = _state()
+    st["microstructure_data"]["BTC"]["liq_imbalance"] = {
+        "value": {"ratio": 0.5, "label": "short_heavy", "note": "空头被迫回补"}
+    }
+    bull = [
+        _ev(
+            claim="爆仓失衡为空头主导",
+            domain="microstructure_data",
+            field="liq_imbalance",
+            value="short_heavy",
+        )
+    ]
+    verified, rejected = ev.verify_evidence({"BTC": bull}, {}, st)
+    assert len(verified["BTC"]["bull_case"]) == 1
+    assert rejected == {}
+    bad = [
+        _ev(
+            claim="爆仓失衡为多头主导",
+            domain="microstructure_data",
+            field="liq_imbalance",
+            value="long_heavy",
+        )
+    ]
+    verified, rejected = ev.verify_evidence({"BTC": bad}, {}, st)
+    assert verified["BTC"]["bull_case"] == []
+    assert rejected["BTC"][0]["reason"].startswith("值不一致")
+
+
+def test_verify_label_with_note_suffix() -> None:
+    """标签型复合值 LLM 整串引用 {label}（{note}）（渲染格式）也通过；
+    错 label 即使带括号注释仍剔除（防误放）。"""
+    st = _state()
+    st["microstructure_data"]["BTC"]["liq_imbalance"] = {
+        "value": {"ratio": 0.5, "label": "short_heavy", "note": "空头被迫回补"}
+    }
+    bull = [
+        _ev(
+            claim="爆仓失衡为空头主导，空头被迫回补",
+            domain="microstructure_data",
+            field="liq_imbalance",
+            value="short_heavy（空头爆仓额高于多头（空头被迫回补，反弹压力大））",
+        )
+    ]
+    verified, rejected = ev.verify_evidence({"BTC": bull}, {}, st)
+    assert len(verified["BTC"]["bull_case"]) == 1
+    assert rejected == {}
+    bad = [
+        _ev(
+            claim="爆仓失衡为多头主导",
+            domain="microstructure_data",
+            field="liq_imbalance",
+            value="long_heavy（多头爆仓额高于空头（多头被迫平仓，下行压力大））",
+        )
+    ]
+    verified, rejected = ev.verify_evidence({"BTC": bad}, {}, st)
+    assert verified["BTC"]["bull_case"] == []
+    assert rejected["BTC"][0]["reason"].startswith("值不一致")
+
+
 def test_verify_value_tolerance() -> None:
     """数值宽容：浮点精度差与整数等价写法通过（1007.0 vs "1007"）。"""
     bull = [_ev(domain="fundamental_data", field="tvl.value", value="1007")]

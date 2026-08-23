@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .datasources import binance, binance_futures
+from .datasources import binance_futures
 from .datasources.base import UNKNOWN
 from .datasources.mock import mock_screening_candidates
 from .env import is_mock_mode
@@ -239,13 +239,14 @@ def _candidate(row: dict, rules_desc: str) -> dict:
 
 
 def select_tokens(rules: list[ScreenRule], top_n: int = 10) -> ScreeningResult:
-    """确定性选币：全市场快照各 1 次 → 现货 USDT 白名单 → Filter AND → Rank → top_n。
+    """确定性选币：全市场快照各 1 次 → 合约永续 USDT 白名单 → Filter AND → Rank → top_n。
 
     快照任一失败抛 ``ScreeningError`` 批终止（失败即失败，不回退 mock）；
     无 rank 规则时跳过排序（防 StopIteration）。
-    白名单（规格：ticker + exchangeInfo 各 1 次）：与 BinanceApi 筛选同款——
-    仅保留现货 ``TRADING`` 且以 USDT 计价、标的非稳定币的交易对，排除
-    ETHBTC/BTCU/BTCUSD1 等非规范 symbol 进入候选。
+    白名单（规格：ticker + exchangeInfo 各 1 次）：与 FuturesApi 筛选同款——
+    仅保留永续合约 ``TRADING``（contractType=PERPETUAL，排除 XAUUSDT/TSLAUSDT
+    等交割合约）且以 USDT 计价、标的非稳定币的交易对，排除 ETHBTC/BTCU 等
+    非规范 symbol 进入候选。
     """
     if is_mock_mode():
         return ScreeningResult(
@@ -254,9 +255,9 @@ def select_tokens(rules: list[ScreenRule], top_n: int = 10) -> ScreeningResult:
             candidates=mock_screening_candidates(),
         )
 
-    tickers = binance.fetch_ticker_24h_all()
+    tickers = binance_futures.fetch_fapi_ticker_24h_all()
     listing = binance_futures.fetch_listing_days()
-    info = binance.fetch_exchange_info()
+    info = binance_futures.fetch_exchange_info()
     if tickers is None or listing is None or info is None:
         raise ScreeningError("全市场快照拉取失败，批终止（失败即失败，不回退 mock）")
 
@@ -264,15 +265,15 @@ def select_tokens(rules: list[ScreenRule], top_n: int = 10) -> ScreeningResult:
         s["symbol"]
         for s in info.get("symbols") or []
         if s.get("status") == "TRADING"
+        and s.get("contractType") == "PERPETUAL"
         and str(s.get("symbol", "")).endswith("USDT")
         and s.get("baseAsset") not in _STABLE_BASES
     }
 
     rows: list[dict] = []
-    for t in tickers:
-        symbol = t.get("symbol")
-        if not symbol or symbol not in whitelist:
-            continue  # 非现货 USDT 交易对（交叉对/指数/非交易状态）不参与筛选
+    for symbol, t in tickers.items():
+        if symbol not in whitelist:
+            continue  # 非合约 USDT 永续（交割合约/交叉对/非交易状态）不参与筛选
         rows.append(
             {
                 "symbol": symbol,

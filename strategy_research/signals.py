@@ -435,6 +435,32 @@ def market_width(fapi_tickers: dict | None, btc_klines: list[dict] | None) -> di
     return {"value": out}
 
 
+#: 多空爆仓失衡阈值：ratio >= 1.2 多头爆仓主导（下行压力）；<= 1/1.2 空头主导
+_LIQ_IMBALANCE_THRESHOLD = 1.2
+
+
+def liquidation_imbalance(long_liq: Any, short_liq: Any) -> dict | None:
+    """多空爆仓失衡（24h 聚合额）：ratio = 多头爆仓额 / 空头爆仓额。
+
+    ratio 高 = 多头被迫平仓主导（下行压力）；低 = 空头被爆主导（回补反弹
+    压力）；任一缺失 → None；双方均无爆仓 → None（零爆仓无信息不猜方向）；
+    仅多头有爆仓（空头为零）→ ratio=None + long_heavy（避免 inf 序列化）。
+    """
+    long_liq, short_liq = _num(long_liq), _num(short_liq)
+    if long_liq is None or short_liq is None:
+        return None
+    if long_liq <= 0 and short_liq <= 0:
+        return None
+    ratio = long_liq / short_liq if short_liq > 0 else None
+    if ratio is None or ratio >= _LIQ_IMBALANCE_THRESHOLD:
+        label, note = "long_heavy", "多头爆仓额高于空头（多头被迫平仓，下行压力大）"
+    elif ratio <= 1.0 / _LIQ_IMBALANCE_THRESHOLD:
+        label, note = "short_heavy", "空头爆仓额高于多头（空头被迫回补，反弹压力大）"
+    else:
+        label, note = "balanced", "多空爆仓额接近（强平压力均衡）"
+    return {"ratio": ratio, "label": label, "note": note}
+
+
 def oi_price_divergence(
     price_ret: float | None, oi_change: float | None
 ) -> dict | None:

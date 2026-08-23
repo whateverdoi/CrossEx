@@ -107,7 +107,13 @@ def _build_artifacts(state: dict) -> dict:
 # ── 04 票：信号快照 + 数据快照投影（确定性） ──────────────────
 
 
-_SIGNAL_KEYS = ("momentum", "quadrant", "funding_pctile_90d", "oi_price_divergence")
+_SIGNAL_KEYS = (
+    "momentum",
+    "quadrant",
+    "funding_pctile_90d",
+    "oi_price_divergence",
+    "liq_imbalance",
+)
 #: 第一层派生（08 票）：funding_z 从 market 快照读，其余从 signals.market_metrics.value 读
 _MARKET_METRIC_KEYS = (
     "funding_z",
@@ -145,6 +151,7 @@ def _signal_snapshot(symbol: str, state: dict) -> dict:
         ms = (state.get("microstructure_data") or {}).get(symbol) or {}
         pct = (mkt.get("funding_pctile_90d") or {}).get("value")
         od = (ms.get("oi_price_divergence") or {}).get("value") or {}
+        imb = (ms.get("liq_imbalance") or {}).get("value") or {}
         out.update(
             {
                 "momentum": mom if isinstance(mom, (int, float)) else None,
@@ -153,6 +160,7 @@ def _signal_snapshot(symbol: str, state: dict) -> dict:
                 "oi_price_divergence": od.get("label")
                 if isinstance(od, dict)
                 else None,
+                "liq_imbalance": imb.get("label") if isinstance(imb, dict) else None,
             }
         )
         fz = (mkt.get("funding_z") or {}).get("value")

@@ -15,7 +15,13 @@ from strategy_research import context, env
 from strategy_research import evidence as ev_mod
 from strategy_research import scanner_snapshot as scan_mod
 from strategy_research import signals as sig_mod
-from strategy_research.datasources import binance, binance_futures, defillama, mock
+from strategy_research.datasources import (
+    binance,
+    binance_futures,
+    defillama,
+    mock,
+    okx,
+)
 from strategy_research.datasources import web as web_ds
 from strategy_research.evidence import EvidenceItem
 from strategy_research.schemas import _extract_json
@@ -152,6 +158,15 @@ def _funding_rates(premium: list[dict] | None) -> dict[str, float]:
 
 _FUND_CORE = ("tvl", "tvl_change_1d", "tvl_change_7d", "tvl_change_30d")
 _FUND_KEYS = (*_FUND_CORE, "mcap", "fdv")
+
+#: 爆仓装配键（错误兜底键表同步于此，防结构契约断裂）
+_LIQUIDATION_KEYS = (
+    "liq_long_24h",
+    "liq_short_24h",
+    "liq_total_24h",
+    "liq_total_oi_ratio",
+    "liq_imbalance",
+)
 
 
 def _fund_incomplete(fund: dict) -> bool:
@@ -369,6 +384,41 @@ def _microstructure(
     return ms
 
 
+def _liquidation(symbol: str, mkt: dict) -> dict:
+    """爆仓聚合装配（OKX 公开源，OKX 单所口径）：4h 序列 → 24h 多空爆仓额。
+
+    任一失败/无数据 → 各字段 None（UNKNOWN 纪律，失败即失败不回退
+    mock）；相对 OI 比例 = 24h 爆仓总额 / (OI × 最新价)。
+    """
+    base = defillama._strip_quote(symbol)
+    rows = okx.fetch_liquidation_24h(base)
+    out: dict[str, Any] = {}
+    if not rows:  # 失败/无数据：全部 UNKNOWN
+        for key in _LIQUIDATION_KEYS:
+            out[key] = _dp(None, "okx")
+        return out
+    recent = rows[-6:]  # 最近 6 个 4h 点 ≈ 24h（序列时间升序，最新在末尾）
+    long_liq = sum(r["long_liq_usd"] for r in recent)
+    short_liq = sum(r["short_liq_usd"] for r in recent)
+    total = long_liq + short_liq
+    out["liq_long_24h"] = _dp(long_liq, "okx")
+    out["liq_short_24h"] = _dp(short_liq, "okx")
+    out["liq_total_24h"] = _dp(total, "okx")
+    oi = (mkt.get("oi") or {}).get("value")
+    price = (mkt.get("price") or {}).get("value")
+    oi_value = (
+        oi * price
+        if isinstance(oi, (int, float)) and isinstance(price, (int, float))
+        else None
+    )
+    ratio = total / oi_value if oi_value and oi_value > 0 else None
+    out["liq_total_oi_ratio"] = _dp(ratio, "okx")
+    out["liq_imbalance"] = _dp(
+        sig_mod.liquidation_imbalance(long_liq, short_liq), "okx"
+    )
+    return out
+
+
 def _web(symbol: str) -> dict:
     """Web 新闻快照：items 截取 {date, title, source}。"""
     base = defillama._strip_quote(symbol)
@@ -460,6 +510,8 @@ def _error_snapshots(
         "oi_price_divergence",
     ):
         ms[key] = _dp(None, "binance_futures")
+    for key in _LIQUIDATION_KEYS:  # 爆仓键（source 独立：okx）
+        ms[key] = _dp(None, "okx")
     web_snap: dict[str, Any] = {
         "symbol": symbol,
         "items": None,
@@ -485,6 +537,7 @@ def _one(symbol: str, shared: dict) -> tuple[dict, dict, dict, dict]:
         mkt, taker = _error_snapshots(symbol, exc)[1], None
     try:
         ms = _microstructure(symbol, taker, mkt["change_24h"]["value"])
+        ms.update(_liquidation(symbol, mkt))
     except Exception as exc:
         ms = _error_snapshots(symbol, exc)[2]
     try:

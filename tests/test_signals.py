@@ -268,6 +268,24 @@ def test_oi_price_divergence() -> None:
         assert got["note"]
 
 
+def test_liquidation_imbalance() -> None:
+    """多空爆仓失衡：缺失/双零 → None；失衡三分 + 极端（空头零）不产 inf。"""
+    assert sig.liquidation_imbalance(None, 5.0) is None
+    assert sig.liquidation_imbalance(5.0, None) is None
+    assert sig.liquidation_imbalance(0.0, 0.0) is None
+    got = sig.liquidation_imbalance(800_000.0, 500_000.0)
+    assert got["label"] == "long_heavy"
+    assert got["ratio"] == pytest.approx(1.6)
+    got = sig.liquidation_imbalance(300_000.0, 700_000.0)
+    assert got["label"] == "short_heavy"
+    got = sig.liquidation_imbalance(600_000.0, 550_000.0)
+    assert got["label"] == "balanced"
+    got = sig.liquidation_imbalance(100.0, 0.0)
+    assert got["label"] == "long_heavy" and got["ratio"] is None  # 避免 inf
+    got = sig.liquidation_imbalance(0.0, 100.0)
+    assert got["label"] == "short_heavy"
+
+
 # ── sentiment_raw ──────────────────────────────────────────
 
 

@@ -19,7 +19,9 @@ from typing import Any
 SENTIMENT_NOTE = (
     "持仓指标原始直读；解读规则：funding 高=拥挤反向，多空比高=偏多；"
     "funding_pctile_90d 高分位=费率极端拥挤；funding_z 高=费率相对主流更拥挤（多拥挤），"
-    "funding_z 低=费率相对主流更低（空拥挤）；oi_price_divergence 同向=趋势确认，背离=弱势"
+    "funding_z 低=费率相对主流更低（空拥挤）；oi_price_divergence 同向=趋势确认，背离=弱势；"
+    "爆仓失衡比高=多头爆仓主导（下行压力），低=空头爆仓主导（回补反弹压力）；"
+    "爆仓额/OI 比高=强平风险集中"
 )
 
 
@@ -217,8 +219,17 @@ def _facts_summary_lines(symbol: str, state: dict) -> list[str]:
         "ls_ratio_top_acc",
         "ls_ratio_top_pos",
         "taker_bs_ratio",
+        "liq_long_24h",
+        "liq_short_24h",
+        "liq_total_24h",
+        "liq_total_oi_ratio",
     ):
         lines.append(f"{key}: {_dp_text(ms.get(key))}")
+    imb = (ms.get("liq_imbalance") or {}).get("value") or {}
+    lines.append(
+        f"liq_imbalance: {imb.get('label') or 'UNKNOWN'}"
+        + (f"（{imb['note']}）" if imb.get("note") else "")
+    )
     snap = state.get("scanner_snapshot") or {}
     msnap = (snap.get("market") or {}).get(symbol) or {}
     micsnap = (snap.get("microstructure") or {}).get(symbol) or {}

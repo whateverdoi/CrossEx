@@ -214,6 +214,29 @@ def mock_series(
     ]
 
 
+def mock_liquidation(
+    symbol: str, interval: str = "4h", limit: int = 14
+) -> list[dict]:
+    """OKX 爆仓聚合序列 mock（与真实解析后字段同构）。
+
+    固定常量序列（时间升序，最新在末尾）；装配层走同一聚合/信号路径，
+    mock 与真实模式逐值相等（同构纪律，不写死信号层常量）。
+    """
+    step_ms = {"1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000}.get(
+        interval, 14_400_000
+    )
+    now = _now_ms()
+    # 常量：多头爆仓额高于空头（失衡比 1.6 → long_heavy）
+    return [
+        {
+            "time": now - (limit - 1 - i) * step_ms,
+            "long_liq_usd": 800_000.0,
+            "short_liq_usd": 500_000.0,
+        }
+        for i in range(max(1, limit))
+    ]
+
+
 def mock_spot_exchange_info() -> dict:
     """现货全量交易对信息（与 fetch_exchange_info 同构；白名单=全部 mock 现货对）。"""
     return {

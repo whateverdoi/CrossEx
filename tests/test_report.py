@@ -139,6 +139,7 @@ _ALL_SIGNAL_KEYS = [
     "quadrant",
     "funding_pctile_90d",
     "oi_price_divergence",
+    "liq_imbalance",
     "tvl_trend_30d",
     "fees_trend_30d",
     "stablecoin_change_30d",

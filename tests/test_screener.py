@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from strategy_research.datasources import binance, binance_futures
+from strategy_research.datasources import binance_futures
 from strategy_research.main import _resolve_tokens, main, parse_args
 from strategy_research.screener import (
     DEFAULT_RULES,
@@ -131,36 +131,56 @@ def test_rank_mispricing():
 # ── select_tokens 集成（真实模式，注入 fetch） ─────────────
 
 
-def _fake_tickers() -> list[dict]:
-    return [
-        {"symbol": "BTCUSDT", "price_change_pct": 2.5, "quote_volume": 1.2e9},
-        {"symbol": "SOLUSDT", "price_change_pct": 5.2, "quote_volume": 3.0e8},
-        {"symbol": "NEWUSDT", "price_change_pct": -3.1, "quote_volume": 5e8},
-        {"symbol": "OLDUSDT", "price_change_pct": 1.0, "quote_volume": 2.0e8},
-        {"symbol": "USDCUSDT", "price_change_pct": 0.1, "quote_volume": 9.9e9},
-        # 真实全市场 24hr ticker 的噪声对：交叉对/指数类/杠杆代币
-        {"symbol": "ETHBTC", "price_change_pct": 1.0, "quote_volume": 3.0e8},
-        {"symbol": "BTCUSD1", "price_change_pct": 2.4, "quote_volume": 3.4e8},
-        {"symbol": "BTCU", "price_change_pct": 2.5, "quote_volume": 1.3e8},
-        {"symbol": "ETHU", "price_change_pct": 1.7, "quote_volume": 2.8e7},
-    ]
+def _fake_tickers() -> dict[str, dict]:
+    """全市场合约 24hr ticker（fetch_fapi_ticker_24h_all 同构：symbol → 指标）。"""
+    return {
+        "BTCUSDT": {"price": 1.0, "price_change_pct": 2.5, "quote_volume": 1.2e9},
+        "SOLUSDT": {"price": 1.0, "price_change_pct": 5.2, "quote_volume": 3.0e8},
+        "NEWUSDT": {"price": 1.0, "price_change_pct": -3.1, "quote_volume": 5e8},
+        "OLDUSDT": {"price": 1.0, "price_change_pct": 1.0, "quote_volume": 2.0e8},
+        "USDCUSDT": {"price": 1.0, "price_change_pct": 0.1, "quote_volume": 9.9e9},
+        # 真实全市场合约 24hr ticker 的噪声对：交叉对/交割合约
+        "ETHBTC": {"price": 1.0, "price_change_pct": 1.0, "quote_volume": 3.0e8},
+        "XAUUSDT": {"price": 1.0, "price_change_pct": 2.5, "quote_volume": 1.3e8},
+        "TSLAUSDT": {"price": 1.0, "price_change_pct": 1.7, "quote_volume": 2.8e7},
+    }
 
 
 def _fake_exchange_info() -> dict:
-    """现货 exchangeInfo：白名单 = TRADING + USDT 计价 + 标的非稳定币。"""
+    """合约 exchangeInfo：白名单 = TRADING + PERPETUAL + USDT 计价 + 标的非稳定币。"""
     return {
         "symbols": [
-            {"symbol": "BTCUSDT", "status": "TRADING", "baseAsset": "BTC"},
-            {"symbol": "SOLUSDT", "status": "TRADING", "baseAsset": "SOL"},
-            {"symbol": "NEWUSDT", "status": "TRADING", "baseAsset": "NEW"},
-            {"symbol": "OLDUSDT", "status": "TRADING", "baseAsset": "OLD"},
+            {
+                "symbol": "BTCUSDT",
+                "status": "TRADING",
+                "contractType": "PERPETUAL",
+                "baseAsset": "BTC",
+            },
+            {
+                "symbol": "SOLUSDT",
+                "status": "TRADING",
+                "contractType": "PERPETUAL",
+                "baseAsset": "SOL",
+            },
+            {
+                "symbol": "NEWUSDT",
+                "status": "TRADING",
+                "contractType": "PERPETUAL",
+                "baseAsset": "NEW",
+            },
+            {
+                "symbol": "OLDUSDT",
+                "status": "TRADING",
+                "contractType": "PERPETUAL",
+                "baseAsset": "OLD",
+            },
             # 以下全部应被白名单排除
-            {"symbol": "USDCUSDT", "status": "TRADING", "baseAsset": "USDC"},
-            {"symbol": "ETHBTC", "status": "TRADING", "baseAsset": "ETH"},
-            {"symbol": "BTCUSD1", "status": "TRADING", "baseAsset": "BTC"},
-            {"symbol": "BTCU", "status": "TRADING", "baseAsset": "BTC"},
-            {"symbol": "ETHU", "status": "TRADING", "baseAsset": "ETH"},
-            {"symbol": "SUSPENDUSDT", "status": "BREAK", "baseAsset": "SUSPEND"},
+            {"symbol": "USDCUSDT", "status": "TRADING", "contractType": "PERPETUAL", "baseAsset": "USDC"},
+            {"symbol": "XAUUSDT", "status": "TRADING", "contractType": "CURRENT_QUARTER", "baseAsset": "XAU"},
+            {"symbol": "TSLAUSDT", "status": "TRADING", "contractType": "NEXT_QUARTER", "baseAsset": "TSLA"},
+            {"symbol": "ETHBTC", "status": "TRADING", "contractType": "PERPETUAL", "baseAsset": "ETH"},
+            {"symbol": "BTCU", "status": "TRADING", "contractType": "PERPETUAL", "baseAsset": "BTC"},
+            {"symbol": "SUSPENDUSDT", "status": "BREAK", "contractType": "PERPETUAL", "baseAsset": "SUSPEND"},
         ]
     }
 
@@ -177,8 +197,8 @@ def _fake_listing() -> dict[str, int]:
 
 def _patch_fetch(monkeypatch) -> None:
     monkeypatch.setenv("SR_MOCK", "0")
-    monkeypatch.setattr(binance, "fetch_ticker_24h_all", _fake_tickers)
-    monkeypatch.setattr(binance, "fetch_exchange_info", _fake_exchange_info)
+    monkeypatch.setattr(binance_futures, "fetch_fapi_ticker_24h_all", _fake_tickers)
+    monkeypatch.setattr(binance_futures, "fetch_exchange_info", _fake_exchange_info)
     monkeypatch.setattr(binance_futures, "fetch_listing_days", _fake_listing)
 
 
@@ -207,35 +227,35 @@ def test_select_tokens_auto_filters_ranks_and_annotates(monkeypatch):
 
 def test_select_tokens_snapshot_failure_raises_screening_error(monkeypatch):
     monkeypatch.setenv("SR_MOCK", "0")
-    monkeypatch.setattr(binance, "fetch_ticker_24h_all", lambda: None)
-    monkeypatch.setattr(binance, "fetch_exchange_info", _fake_exchange_info)
+    monkeypatch.setattr(binance_futures, "fetch_fapi_ticker_24h_all", lambda: None)
+    monkeypatch.setattr(binance_futures, "fetch_exchange_info", _fake_exchange_info)
     monkeypatch.setattr(binance_futures, "fetch_listing_days", _fake_listing)
     with pytest.raises(ScreeningError):
         select_tokens(DEFAULT_RULES)
 
-    monkeypatch.setattr(binance, "fetch_ticker_24h_all", _fake_tickers)
-    monkeypatch.setattr(binance, "fetch_exchange_info", lambda: None)
+    monkeypatch.setattr(binance_futures, "fetch_fapi_ticker_24h_all", _fake_tickers)
+    monkeypatch.setattr(binance_futures, "fetch_exchange_info", lambda: None)
     monkeypatch.setattr(binance_futures, "fetch_listing_days", lambda: None)
     with pytest.raises(ScreeningError, match="批终止"):
         select_tokens(DEFAULT_RULES)
 
     # exchangeInfo 失败同样批终止（规格：ticker + exchangeInfo 各 1 次，任一失败终止）
-    monkeypatch.setattr(binance, "fetch_ticker_24h_all", _fake_tickers)
-    monkeypatch.setattr(binance, "fetch_exchange_info", lambda: None)
+    monkeypatch.setattr(binance_futures, "fetch_fapi_ticker_24h_all", _fake_tickers)
+    monkeypatch.setattr(binance_futures, "fetch_exchange_info", lambda: None)
     monkeypatch.setattr(binance_futures, "fetch_listing_days", _fake_listing)
     with pytest.raises(ScreeningError, match="批终止"):
         select_tokens(DEFAULT_RULES)
 
 
 def test_select_tokens_whitelist_filters_noise_pairs(monkeypatch):
-    """现货 USDT 白名单：交叉对/指数类/杠杆代币/非 TRADING/稳定币标的全部排除。"""
+    """合约永续 USDT 白名单：交叉对/交割合约/非 TRADING/稳定币标的全部排除。"""
     _patch_fetch(monkeypatch)
     result = select_tokens(
         [ScreenRule("rank", "quote_volume", {})], top_n=50
     )
     symbols = [c["symbol"] for c in result.candidates]
     assert "BTCUSDT" in symbols
-    for noise in ("ETHBTC", "BTCUSD1", "BTCU", "ETHU", "USDCUSDT", "SUSPENDUSDT"):
+    for noise in ("ETHBTC", "XAUUSDT", "TSLAUSDT", "BTCU", "USDCUSDT", "SUSPENDUSDT"):
         assert noise not in symbols, f"白名单应排除 {noise}"
 
 
@@ -249,7 +269,7 @@ def test_select_tokens_edge_cases(monkeypatch):
 
     monkeypatch.setenv("SR_MOCK", "0")
     monkeypatch.setattr(
-        binance, "fetch_ticker_24h_all", lambda: [{"symbol": "NOINFOUSDT"}]
+        binance_futures, "fetch_fapi_ticker_24h_all", lambda: {"NOINFOUSDT": {"price": 1.0}}
     )  # 全字段缺失
     monkeypatch.setattr(binance_futures, "fetch_listing_days", dict)
     result2 = select_tokens(DEFAULT_RULES, top_n=10)
@@ -283,8 +303,9 @@ def test_select_tokens_mock_mode_fixed_candidates_no_io(monkeypatch):
     def _fail(*args, **kwargs):
         raise AssertionError("mock 模式不应发起外部请求")
 
-    monkeypatch.setattr(binance, "fetch_ticker_24h_all", _fail)
+    monkeypatch.setattr(binance_futures, "fetch_fapi_ticker_24h_all", _fail)
     monkeypatch.setattr(binance_futures, "fetch_listing_days", _fail)
+    monkeypatch.setattr(binance_futures, "fetch_exchange_info", _fail)
     result = select_tokens(DEFAULT_RULES)
     assert result.mode == "mock"
     assert [c["symbol"] for c in result.candidates] == [

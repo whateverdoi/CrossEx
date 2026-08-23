@@ -158,6 +158,10 @@ def _values_match(actual: Any, expected: str) -> bool:
         except (TypeError, ValueError):
             return False
         return abs(float(actual) - expected_num) <= max(1e-6, 0.05)
+    if isinstance(actual, str) and expected.startswith(actual + "（"):
+        # 标签型复合值渲染为 {label}（{note}），LLM 可能整串引用（含注释）：
+        # 剥离全角括号注释后比较（宽容纪律，同 label 下钻；仅限“（”前缀防误放）
+        return True
     return str(actual) == expected
 
 
@@ -230,6 +234,10 @@ def _verify_item(
         # 数据点包装（{value, source, timestamp, confidence}）自动下钻 value：
         # 宽容 field 漏 .value 后缀（LLM 弱契约，宽容纪律）
         actual = actual["value"]
+    if isinstance(actual, dict) and "label" in actual and isinstance(expected, str):
+        # 标签型复合值（如 liq_imbalance: {ratio, label, note}）自动下钻 label：
+        # LLM 通常只引用 label 字符串，不引用整个 dict（宽容纪律，同 .value 下钻）
+        actual = actual["label"]
     if not _values_match(actual, expected):
         return (
             None,
