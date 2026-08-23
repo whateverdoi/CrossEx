@@ -121,18 +121,32 @@ def _load_shared(tokens: list[str]) -> dict:
         for t in tokens
         if slug_map.get(defillama._strip_quote(t), "").startswith("chain:")
     ]
+    premium = binance_futures.fetch_premium_index_all()
     return {
         "tickers": binance.fetch_ticker_24h_all(),
         "listing": binance_futures.fetch_listing_days(),
-        "premium": binance_futures.fetch_premium_index_all(),
+        "premium": premium,
+        "funding_rates": _funding_rates(premium),
         "fapi_prices": binance_futures.fetch_fapi_prices_all(),
         "fapi_tickers": binance_futures.fetch_fapi_ticker_24h_all(),
+        "btc_klines": binance_futures.fetch_fapi_klines(
+            "BTCUSDT", interval="1d", limit=400
+        ),
         "chains": defillama.fetch_chains(),
         "protocols": protocols,
         "slug_map": slug_map,
         "fees": defillama.fetch_fees(protocol_slugs) if protocol_slugs else {},
         "stablecoins": defillama.fetch_stablecoins() if chain_tokens else None,
         "dexs": defillama.fetch_dexs() if chain_tokens else None,
+    }
+
+
+def _funding_rates(premium: list[dict] | None) -> dict[str, float]:
+    """premiumIndex 全量 → {symbol: last_funding_rate}（横截面参照系用）。"""
+    return {
+        row["symbol"]: row["last_funding_rate"]
+        for row in premium or []
+        if isinstance(row.get("last_funding_rate"), (int, float))
     }
 
 
@@ -292,6 +306,16 @@ def _market(symbol: str, shared: dict) -> dict:
     if errors:
         mkt["error"] = "; ".join(errors)
 
+    # 第一层派生（08 票）：波动率家族 / β·α / 费率横截面 Z（klines 在本函数内算）
+    for key, value in sig_mod.volatility_metrics(klines)["value"].items():
+        mkt[key] = _dp(value, "binance_futures")
+    for key, value in sig_mod.beta_alpha(klines, shared.get("btc_klines"))["value"].items():
+        mkt[key] = _dp(value, "binance_futures")
+    mkt["funding_z"] = _dp(
+        sig_mod.funding_cross_sectional_z(shared.get("funding_rates"), exch),
+        "binance_futures",
+    )
+
     # taker 买卖比（market 与 microstructure 共用一次拉取）
     taker = binance_futures.fetch_taker_long_short_ratio(exch, "1h", 24)
     mkt["taker_buy_ratio_24h"] = _dp(_mean(taker, "buy_sell_ratio"), "binance_futures")
@@ -411,6 +435,16 @@ def _error_snapshots(
         "oi",
         "basis",
         "taker_buy_ratio_24h",
+        "rv_7d",
+        "rv_30d",
+        "drawdown_1y",
+        "vol_adj_ret_7d",
+        "vol_adj_ret_30d",
+        "beta_7d",
+        "beta_30d",
+        "alpha_7d",
+        "alpha_30d",
+        "funding_z",
     ):
         mkt[key] = _dp(None, "binance_futures")
     ms: dict[str, Any] = {"board": None, "error": msg, "incomplete": True}
@@ -486,6 +520,9 @@ def collect_data(state: dict) -> dict:
         except Exception as exc:  # 同 report_error 纪律：仅记录不中断批
             meta["scan_error"] = f"扫描器快照读取失败: {exc}"
     shared = _load_shared(tokens)
+    meta["market_env"] = sig_mod.market_width(
+        shared.get("fapi_tickers"), shared.get("btc_klines")
+    )["value"]
     market_data: dict[str, dict] = {}
     fundamental_data: dict[str, dict] = {}
     microstructure_data: dict[str, dict] = {}
@@ -545,6 +582,7 @@ def compute_signals(state: dict) -> dict:
                     "momentum": sig_mod.momentum_score(fund),
                     "divergence": sig_mod.divergence(fund, mkt),
                     "sentiment": sig_mod.sentiment_raw(mkt, ms),
+                    "market_metrics": sig_mod.market_metrics(fund, mkt),
                     "error": None,
                 }
         except Exception as exc:  # 单 token 异常不阻断（规格 ②）
@@ -557,8 +595,8 @@ def _invoke_branch(
 ) -> tuple[list[dict], str | None]:
     """分支单 token 证据提取（02 票）：json_mode 单次调用 + 宽容解析。
 
-    坏条目（claim/source 空）丢弃在装配层；上限 8 条截断（BranchOutput 契约）；
-    异常 → ([], 错误消息)，批不中断。返回 (items, error)。
+    坏条目（claim/source 空）丢弃在装配层；数量不设上限（每条须独立有据，
+    核验层去重兜底）；异常 → ([], 错误消息)，批不中断。返回 (items, error)。
     """
     prompt = context.BULL_PROMPT if side == "bull" else context.BEAR_PROMPT
     items: list[dict] = []
@@ -580,7 +618,7 @@ def _invoke_branch(
                     items.append(item)
             except Exception:  # noqa: S112 —— 坏条目丢弃（02 票）
                 continue
-        return items[:8], None
+        return items, None
     except Exception as exc:
         return [], f"分支异常: {exc}"
 

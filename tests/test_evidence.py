@@ -377,7 +377,7 @@ def _branch_state() -> dict:
 
 def test_branch_nodes_mock_structured_evidence() -> None:
     """mock 模式：两分支产出结构化证据（claim/basis 三元组/source，无 confidence），
-    上限 8 条；mock 引用恒定快照值 → 核验全部通过（无剔除）。
+    数量不设上限；mock 引用恒定快照值 → 核验全部通过（无剔除）。
     分支只写独占字段（不写 meta——并行写共享键冲突，node_order 归 evidence_verify）。"""
     state = _branch_state()
     bull_out = nodes.bull_research(state)
@@ -387,7 +387,6 @@ def test_branch_nodes_mock_structured_evidence() -> None:
     for s in MOCK_TOKENS:
         for items in (bull_out["bull_evidence"][s], bear_out["bear_evidence"][s]):
             assert items, f"{s} 分支产出为空（验收：mock 非空）"
-            assert len(items) <= 8
             for item in items:
                 assert item["claim"] and item["source"]
                 assert set(item["basis"]) == {"domain", "field", "value"}
@@ -401,7 +400,7 @@ def test_branch_nodes_mock_structured_evidence() -> None:
 
 
 def test_branch_bad_items_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
-    """坏条目丢弃：claim/source 缺失条目不进产出（交核验前已滤）；上限 8 条截断。"""
+    """坏条目丢弃：claim/source 缺失条目不进产出（交核验前已滤）；数量不设上限全保留。"""
     raw = {
         "evidence": [
             {
@@ -449,7 +448,7 @@ def test_branch_bad_items_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(nodes.env, "get_llm", lambda *a, **k: fake)
     out = nodes.bull_research({"tokens": ["BTC"]})
     items = out["bull_evidence"]["BTC"]
-    assert len(items) == 8  # 好条目 1 + 溢出 10 → 截断 8
+    assert len(items) == 11  # 好条目 1 + 溢出 10 → 全保留（数量不限）
     assert all(item["claim"] and item["source"] for item in items)
     assert items[0]["claim"] == "好条目"
 

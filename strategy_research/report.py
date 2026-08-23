@@ -1,4 +1,4 @@
-"""⑧ 报告与工件落盘：evidence.md + run.json + candidates.json + snapshot/diff。
+"""④ 报告与工件落盘：evidence.md + run.json + candidates.json + snapshot/diff。
 
 04 票：证据 md（总览表 + 每 token 做多/做空证据表 + 剔除附录）替代 overview.md；
 run.json 含数据快照投影 + 证据清单 + 信号快照 + llm_calls；candidates 仅候选列表
@@ -53,15 +53,19 @@ def build_report(state: dict, meta: dict) -> tuple[Path, dict]:
     run_ts = datetime.now(timezone.utc).isoformat()
     meta["llm_calls"] = _llm_calls()
 
+    run_meta: dict = {
+        "mode": mode,
+        "tokens": state["tokens"],
+        "screening": meta.get("screening") or {"mode": "manual"},
+        "run_ts": run_ts,
+        "node_order": meta.get("node_order") or [],
+        "llm_calls": meta["llm_calls"],
+        "market_env": meta.get("market_env"),
+    }
+    if meta.get("scanner") is not None:  # 仅真实模式（main 注入补跑状态）落盘
+        run_meta["scanner"] = meta["scanner"]
     run = {
-        "meta": {
-            "mode": mode,
-            "tokens": state["tokens"],
-            "screening": meta.get("screening") or {"mode": "manual"},
-            "run_ts": run_ts,
-            "node_order": meta.get("node_order") or [],
-            "llm_calls": meta["llm_calls"],
-        },
+        "meta": run_meta,
         "evidence": state.get("evidence") or {},
         "rejected_evidence": state.get("rejected_evidence") or {},
         "data_snapshot": _build_data_snapshot(state),
@@ -104,18 +108,36 @@ def _build_artifacts(state: dict) -> dict:
 
 
 _SIGNAL_KEYS = ("momentum", "quadrant", "funding_pctile_90d", "oi_price_divergence")
+#: 第一层派生（08 票）：funding_z 从 market 快照读，其余从 signals.market_metrics.value 读
+_MARKET_METRIC_KEYS = (
+    "funding_z",
+    "rv_7d",
+    "rv_30d",
+    "drawdown_1y",
+    "vol_adj_ret_7d",
+    "vol_adj_ret_30d",
+    "beta_7d",
+    "beta_30d",
+    "alpha_7d",
+    "alpha_30d",
+    "turnover",
+)
 _TREND_KEYS = ("tvl_trend_30d", "fees_trend_30d", "stablecoin_change_30d")
 
 
 def _signal_snapshot(symbol: str, state: dict) -> dict:
     """确定性信号快照（04 票）：quadrant/momentum/funding_pctile_90d/
-    oi_price_divergence + 趋势特征（spec D8）。
+    oi_price_divergence + 第一层派生（08 票） + 趋势特征（spec D8）。
 
     任一缺失 → None（UNKNOWN 纪律）；signals 层失败（error 条目）→ 全 None。
     趋势特征值：tvl/fees 为趋势分类（rising/flat/falling），stablecoin 为变化 %。
+    派生键：funding_z 从 market 快照读；rv/beta/alpha/vol_adj/turnover 从
+    signals.market_metrics.value 读（直读数值，快照可校准）。
     """
     sig = (state.get("signals") or {}).get(symbol) or {}
-    out: dict[str, Any] = {k: None for k in (*_SIGNAL_KEYS, *_TREND_KEYS)}
+    out: dict[str, Any] = {
+        k: None for k in (*_SIGNAL_KEYS, *_MARKET_METRIC_KEYS, *_TREND_KEYS)
+    }
     if sig and not sig.get("error"):
         mom = (sig.get("momentum") or {}).get("value")
         quad = ((sig.get("divergence") or {}).get("value") or {}).get("quadrant")
@@ -133,6 +155,12 @@ def _signal_snapshot(symbol: str, state: dict) -> dict:
                 else None,
             }
         )
+        fz = (mkt.get("funding_z") or {}).get("value")
+        out["funding_z"] = fz if isinstance(fz, (int, float)) else None
+        mm = (sig.get("market_metrics") or {}).get("value") or {}
+        for k in _MARKET_METRIC_KEYS[1:]:  # 其余派生键从 signals.market_metrics 直读
+            v = mm.get(k)
+            out[k] = v if isinstance(v, (int, float)) else None
     fund = (state.get("fundamental_data") or {}).get(symbol) or {}
     for k in _TREND_KEYS:
         out[k] = (fund.get(k) or {}).get("value")

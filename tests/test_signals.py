@@ -14,7 +14,7 @@ from strategy_research.datasources import mock as m
 from strategy_research.datasources.mock import MOCK_TOKENS
 
 #: sentiment components 字段集（规格 ② 6 字段 + 票 05 的 ls_ratio_top_acc
-#: + 票 14 的 funding_pctile_90d / oi_price_divergence）
+#: + 票 14 的 funding_pctile_90d / oi_price_divergence + 票 08 的 funding_z）
 _COMPONENT_KEYS = {
     "funding",
     "funding_pctile_90d",
@@ -25,6 +25,7 @@ _COMPONENT_KEYS = {
     "taker_bs_ratio",
     "oi_change_24h",
     "oi_price_divergence",
+    "funding_z",
 }
 
 
@@ -78,6 +79,16 @@ def _mkt(**over: object) -> dict:
         "funding_avg_7d": _dp(0.0001),
         "funding_trend": _dp("rising"),
         "funding_pctile_90d": _dp(50.0),
+        "funding_z": _dp(0.5),
+        "rv_7d": _dp(40.0),
+        "rv_30d": _dp(35.0),
+        "drawdown_1y": _dp(-5.0),
+        "vol_adj_ret_7d": _dp(1.5),
+        "vol_adj_ret_30d": _dp(2.0),
+        "beta_7d": _dp(1.1),
+        "beta_30d": _dp(1.05),
+        "alpha_7d": _dp(0.001),
+        "alpha_30d": _dp(0.002),
         "oi": _dp(1e9),
         "basis": _dp(0.0),
         "taker_buy_ratio_24h": _dp(0.5),
@@ -276,6 +287,7 @@ def test_sentiment_raw() -> None:
             "label": "confirm_long",
             "note": "价涨 OI 增：新多进场，趋势确认",
         },
+        "funding_z": 0.5,
     }
     assert "funding 高=拥挤反向" in s["note"]  # 注记内嵌解读规则（05 票：不再指向已退役 prompt）
     # 缺失
@@ -345,6 +357,164 @@ def test_series_trend() -> None:
     assert sig.series_trend([{"date": i, "tvl": 1.0} for i in range(3)], "tvl", 30) is None
 
 
+# ── 第一层派生（08 票） ─────────────────────────────────
+
+
+def test_funding_cross_sectional_z() -> None:
+    """正常 / 缺失 / 异常：固定 4 主币参照系 σ 离差；无离散 → 0.0；样本 <2 → None。"""
+    rates = {
+        "BTCUSDT": 0.0001,
+        "ETHUSDT": 0.0001,
+        "BNBUSDT": 0.0003,
+        "SOLUSDT": 0.0001,
+        "UNIUSDT": 0.0005,
+    }
+    # mean=0.00015, std≈8.66e-5 → UNI: 0.00035/std ≈ 4.04；BTC: -0.00005/std ≈ -0.58
+    assert sig.funding_cross_sectional_z(rates, "UNIUSDT") == pytest.approx(4.04, abs=0.02)
+    assert sig.funding_cross_sectional_z(rates, "BTCUSDT") == pytest.approx(-0.58, abs=0.02)
+    # 参照系无离散 → 0.0（不猜方向）
+    const = {s: 0.0001 for s in ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT")}
+    assert sig.funding_cross_sectional_z(const, "BTCUSDT") == 0.0
+    # 缺失 / 异常：输入缺失 / 参照系样本 <2 / 目标不在表内 / 非法值过滤
+    assert sig.funding_cross_sectional_z(None, "BTCUSDT") is None
+    assert sig.funding_cross_sectional_z({}, "BTCUSDT") is None
+    assert sig.funding_cross_sectional_z(rates, "DOGEUSDT") is None  # 目标缺失
+    assert sig.funding_cross_sectional_z({"BTCUSDT": 0.0001}, "BTCUSDT") is None
+    bad = {**rates, "ETHUSDT": "n/a"}  # 非数值参照系成员过滤后仍 3 个 → 正常算
+    assert sig.funding_cross_sectional_z(bad, "UNIUSDT") is not None
+
+
+def test_volatility_metrics() -> None:
+    """正常 / 缺失 / 异常：rv = std×√365×100（年化 %）；drawdown 距窗口高点；
+    vol_adj_ret = ret/(rv/√(365/N))；样本不足 / rv=0 → None。"""
+    # 正常：收益交替 ±1% 的 8 根日线 → 7 个收益，std≈0.00990 → rv_7d≈18.9
+    closes = [100.0]
+    for i in range(7):
+        closes.append(closes[-1] * (1.01 if i % 2 == 0 else 0.99))
+    klines = [
+        {"open_time": i * 86_400_000, "close_price": c} for i, c in enumerate(closes)
+    ]
+    v = sig.volatility_metrics(klines)["value"]
+    assert v["rv_7d"] == pytest.approx(18.9, abs=0.1)
+    assert v["rv_30d"] is None  # 样本不足（需 31 根）
+    assert v["drawdown_1y"] == pytest.approx(-0.03, abs=0.01)  # 峰值 101（p1）最新 100.97
+    # vol_adj_ret_7d：ret_7d≈0.97% ÷ (18.9/√(365/7)) ≈ 0.37
+    assert v["vol_adj_ret_7d"] == pytest.approx(0.37, abs=0.02)
+    assert v["vol_adj_ret_30d"] is None
+    # 缺失
+    assert sig.volatility_metrics(None)["value"] == {
+        "rv_7d": None,
+        "rv_30d": None,
+        "drawdown_1y": None,
+        "vol_adj_ret_7d": None,
+        "vol_adj_ret_30d": None,
+    }
+    assert sig.volatility_metrics([])["value"]["rv_7d"] is None
+    # 异常 / 退化：收益恒定 → rv=0 → vol_adj_ret None（除零防护）；非法值 → None
+    flat = [{"open_time": i * 86_400_000, "close_price": 100.0} for i in range(35)]
+    vf = sig.volatility_metrics(flat)["value"]
+    assert vf["rv_7d"] == 0.0 and vf["rv_30d"] == 0.0
+    assert vf["vol_adj_ret_7d"] is None and vf["drawdown_1y"] == 0.0
+    bad = [{"open_time": i, "close_price": "n/a"} for i in range(35)]
+    vb = sig.volatility_metrics(bad)["value"]
+    assert vb["rv_7d"] is None and vb["drawdown_1y"] is None
+
+
+def test_beta_alpha() -> None:
+    """正常 / 缺失 / 异常：token 收益恒为 BTC 的 1.5 倍 → β=1.5、α≈0；
+    对齐样本不足 / BTC 无离散 → None。"""
+    btc, tok = [100.0], [50.0]
+    for i in range(1, 40):
+        btc.append(btc[-1] * (1.01 if i % 2 else 0.995))
+        tok.append(tok[-1] * (1.015 if i % 2 else 0.9925))
+    kl = lambda cs: [
+        {"open_time": i * 86_400_000, "close_price": c} for i, c in enumerate(cs)
+    ]
+    b = sig.beta_alpha(kl(tok), kl(btc))["value"]
+    assert b["beta_7d"] == pytest.approx(1.5, abs=0.01)
+    assert b["beta_30d"] == pytest.approx(1.5, abs=0.01)
+    assert b["alpha_7d"] == pytest.approx(0.0, abs=1e-3)
+    assert b["alpha_30d"] == pytest.approx(0.0, abs=1e-3)
+    # 缺失
+    assert sig.beta_alpha(None, None)["value"] == {
+        "beta_7d": None,
+        "beta_30d": None,
+        "alpha_7d": None,
+        "alpha_30d": None,
+    }
+    assert sig.beta_alpha([], kl(btc))["value"]["beta_7d"] is None
+    # 异常：BTC 无离散（常数序列）→ 除零 → None
+    flat_btc = [{"open_time": i * 86_400_000, "close_price": 100.0} for i in range(40)]
+    assert sig.beta_alpha(kl(tok), flat_btc)["value"]["beta_7d"] is None
+
+
+def test_turnover() -> None:
+    """正常 / 缺失 / 异常：成交额 ÷ 市值；任一非数值或 ≤0 → None。"""
+    assert sig.turnover(1e9, 1e11) == pytest.approx(0.01)
+    assert sig.turnover(None, 1e11) is None
+    assert sig.turnover(1e9, None) is None
+    assert sig.turnover(0.0, 1e11) is None
+    assert sig.turnover(1e9, 0.0) is None
+    assert sig.turnover("x", 1e11) is None
+
+
+def test_market_metrics() -> None:
+    """直读 mkt 派生字段 + 换手率（quote_volume/mcap）；输入缺失 → 全 None。"""
+    v = sig.market_metrics(_fund(), _mkt())["value"]
+    assert v["rv_7d"] == 40.0
+    assert v["beta_7d"] == 1.1
+    assert v["alpha_30d"] == 0.002
+    assert v["turnover"] == pytest.approx(1e9 / 500.0)
+    assert sig.market_metrics(None, None)["value"] == {
+        "rv_7d": None,
+        "rv_30d": None,
+        "drawdown_1y": None,
+        "vol_adj_ret_7d": None,
+        "vol_adj_ret_30d": None,
+        "beta_7d": None,
+        "beta_30d": None,
+        "alpha_7d": None,
+        "alpha_30d": None,
+        "turnover": None,
+    }
+    # chain 无 mcap → turnover None（结构性缺失同构）
+    chain = _fund(kind="chain", mcap=_dp(None))
+    assert sig.market_metrics(chain, _mkt())["value"]["turnover"] is None
+
+
+def test_market_width() -> None:
+    """过滤 quote_volume≥1e6；up_ratio 上涨占比 / 中位数；BTC 尾窗收益；缺失 → None。"""
+    tickers = {
+        "BTCUSDT": {"price": 1.0, "price_change_pct": 2.0, "quote_volume": 1e9},
+        "ETHUSDT": {"price": 1.0, "price_change_pct": -1.0, "quote_volume": 5e8},
+        "SOLUSDT": {"price": 1.0, "price_change_pct": 3.0, "quote_volume": 2e6},
+        "UNIUSDT": {"price": 1.0, "price_change_pct": 5.0, "quote_volume": 5e5},  # 过滤
+        "DOGEUSDT": {"price": 1.0, "price_change_pct": 4.0, "quote_volume": "n/a"},  # 非法
+    }
+    # 25 根日线：7d 尾窗有值（需 9 根），30d 尾窗不足（需 32 根）
+    closes = [
+        {"open_time": i * 86_400_000, "close_price": 100.0 * (1.01**i)}
+        for i in range(25)
+    ]
+    w = sig.market_width(tickers, closes)["value"]
+    # 过滤后 3 家（BTC/ETH/SOL）：涨 2 家 → 2/3；中位数 = sorted[-1,2,3][1] = 2.0
+    assert w["up_ratio_24h"] == pytest.approx(2 / 3, abs=0.0001)  # round 到 4 位
+    assert w["median_change_24h"] == pytest.approx(2.0)
+    assert w["btc_ret_24h"] == 2.0
+    assert w["btc_ret_7d"] == pytest.approx((1.01**7 - 1) * 100.0, abs=0.01)
+    assert w["btc_ret_30d"] is None  # 样本不足
+    # 缺失 / 空
+    assert sig.market_width(None, None)["value"] == {
+        "up_ratio_24h": None,
+        "median_change_24h": None,
+        "btc_ret_24h": None,
+        "btc_ret_7d": None,
+        "btc_ret_30d": None,
+    }
+    empty = sig.market_width({}, closes)["value"]
+    assert empty["up_ratio_24h"] is None and empty["median_change_24h"] is None
+
+
 # ── compute_signals 节点 ───────────────────────────────────
 
 
@@ -367,6 +537,7 @@ def test_compute_signals_mock_full() -> None:
             "momentum",
             "divergence",
             "sentiment",
+            "market_metrics",
             "error",
         }
         assert sigs[symbol]["error"] is None
@@ -410,6 +581,7 @@ def test_mock_signals_consistent_with_pure_functions() -> None:
             "momentum": sig.momentum_score(fund),
             "divergence": sig.divergence(fund, mkt),
             "sentiment": sig.sentiment_raw(mkt, ms),
+            "market_metrics": sig.market_metrics(fund, mkt),
         }
         got = m.mock_signals_data(symbol, fund["kind"])
         for key, value in want.items():

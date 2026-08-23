@@ -50,7 +50,6 @@ def test_mock_evidence_shape(full_result):
             ("bear", result["bear_evidence"][s]),
         ):
             assert items, f"{s} {side} 证据为空（验收：mock 非空）"
-            assert len(items) <= 8
             for it in items:
                 assert it["claim"]
                 assert set(it["basis"]) == {"domain", "field", "value"}
@@ -158,7 +157,7 @@ def test_facts_summary_scanner_section():
 
 
 def test_mock_full_chain_keeps_scanner_snapshot(scanned_full_result):
-    """验收：全链 state 透传 scanner_snapshot（分支摘要同源参考，⑧ 报告消费）。"""
+    """验收：全链 state 透传 scanner_snapshot（分支摘要同源参考，④ 报告消费）。"""
     result = scanned_full_result
     snap = result["scanner_snapshot"]
     assert snap["date"] == "2026-08-16"

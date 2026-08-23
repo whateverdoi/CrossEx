@@ -21,3 +21,4 @@ def test_main_produces_run_json_and_evidence(tmp_path, monkeypatch):
     data = json.loads((report_dir / "run.json").read_text(encoding="utf-8"))
     assert data["meta"]["mode"] == "mock"
     assert data["meta"]["tokens"] == ["BTC", "ETH"]
+    assert "scanner" not in data["meta"]  # mock 模式不触发扫描器补跑（离线纪律）

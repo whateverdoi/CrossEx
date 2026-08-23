@@ -1,6 +1,6 @@
 # CryptoResearch
 
-加密资产策略研究 Agent：一条 8 节点线性 LangGraph 管线——确定性信号层 → 多分析师事实收集 → 对抗式审查（挑战/反驳）→ 确定性风控终审，最终产出可验证的决策报告工件。
+加密资产策略研究 Agent：一条 6 节点并行分支 LangGraph 管线——确定性信号层 → 多空证据双分支并行采证（bull/bear 互不可见）→ 确定性证据核验 → 证据工件落盘，最终产出可验证的证据陈列报告工件。
 
 ## 快速开始
 
@@ -30,6 +30,9 @@ SR_MOCK=1 python -m strategy_research.main
 | `SR_MOCK` | 可选 | `1` = 全离线 mock 模式（零外部请求） |
 | `SR_TOKENS` | 可选 | 手动指定币种（逗号分隔），与 `--tokens` 互斥 |
 | `DEEPSEEK_MODEL` | 可选 | 默认 `deepseek-chat`，可换 `deepseek-reasoner` 等 |
+| `SR_SCAN_AUTO` | 可选 | `0` = 关闭扫描器快照陈旧自动补跑（默认开） |
+| `SR_SCAN_DIR` | 可选 | 扫描器快照目录覆盖（默认 `~/Projects/python_projects/BinanceApi/data/research`） |
+| `SR_SCAN_DATE` | 可选 | 强制指定快照日期（默认取目录内最新） |
 
 数据源层（Binance / DefiLlama / 新闻 RSS）零环境变量，无需配置。
 
@@ -86,6 +89,20 @@ python -m pytest                    # 全量单测（mock 模式，零外部请�
 python -m ruff check strategy_research/ tests/
 ```
 
+### 7. 扫描器快照（自动补跑，无需手动操作）
+
+报告中的**榜单/微观结构数据**（boards、多窗口涨跌幅、OI 变化、多空比、taker 比、funding 趋势）来自 BinanceApi 项目的每日扫描器产出 CSV（`data/research/{date}_all/movers/microstructure.csv`），本 agent 只读消费。
+
+**新鲜度由 main 自动保证**：非 mock 模式下，`main` 启动时检查快照日期——若距今天超过 1 天（陈旧），自动以子进程调用 BinanceApi 的 `research/scan.py` 补跑（全市场约 15 分钟），产出当日快照后再继续运行。**你不需要手动跑扫描器**，也不需要任何额外步骤：
+
+```bash
+python -m strategy_research.main   # 陈旧 → 自动补跑 → 用当日快照继续
+```
+
+- 补跑状态写入 `run.json.meta.scanner`（`fresh` / `refreshed` / `failed` / `unavailable`），失败不阻断运行（沿用旧快照 + 留痕）
+- mock 模式不触发补跑（离线纪律）；`SR_SCAN_AUTO=0` 可关闭
+- 快照日期会渲染在 `evidence.md` 每币标题下，可随时核对数据新鲜度
+
 ## 管线概览
 
 ```
@@ -93,8 +110,8 @@ screener（图外入口，确定性筛选）
    ↓ tokens
 ① collect_data      确定性：行情/估值/微观结构快照（含 funding 分位、OI 价格背离）
 ② compute_signals   确定性：估值/动量/背离 + sentiment 拥挤度纯函数
-bull_research       多头证据研究员（json_mode 单次调用，≤8 条证据）
-bear_research       空头证据研究员（json_mode 单次调用，≤8 条证据）
+bull_research       多头证据研究员（json_mode 单次调用，数量不设上限）
+bear_research       空头证据研究员（json_mode 单次调用，数量不设上限）
 ③ evidence_verify   确定性核验：basis 逐级解引用，剔除留痕
 ④ write_report      工件落盘
 ```
@@ -124,6 +141,7 @@ strategy_research/
 ├── nodes.py            # 各节点实现（数据装配/信号/分支/核验/报告）
 ├── signals.py          # 确定性信号纯函数（无 IO，缺失 → None）
 ├── screener.py         # 币种筛选规则引擎（Filter AND → Rank Top N）
+├── scanner_snapshot.py # 扫描器快照读取 + 陈旧自动补跑（子进程）
 ├── schemas.py          # 宽容 JSON 解析器（_extract_json 系列）
 ├── evidence.py         # 证据体系（EvidenceItem + 确定性核验）
 ├── context.py          # 分支 prompt + 摘要构建器 + 情绪解读注记

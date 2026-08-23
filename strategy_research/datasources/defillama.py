@@ -168,7 +168,7 @@ def fetch_protocol_tvl_history(
 ) -> list[dict] | None:
     """协议 TVL 历史序列（每日）：``[{date, tvl}]``；失败/空 → None。
 
-    与 fetch_protocol_tvl 同一端点，供 ③/⑤ 历史序列工具（降采样在工具层）。
+    与 fetch_protocol_tvl 同一端点，供 ① 趋势特征确定性计算（series_change / series_trend 输入）。
     """
     if env.is_mock_mode():
         return mock.mock_protocol_tvl_history(protocol)

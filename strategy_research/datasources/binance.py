@@ -2,7 +2,7 @@
 
 - ``fetch_ticker_24h_all()``：/api/v3/ticker/24hr 全市场（权重 80），
   返回 ``[{symbol, price, price_change_pct, quote_volume}]``（float 化）；
-  失败返回 ``None``（装配层标 UNKNOWN，规格 ⑨ 契约）。
+  失败返回 ``None``（装配层标 UNKNOWN，规格 ① 契约）。
 - ``fetch_exchange_info()``：/api/v3/exchangeInfo 全量交易对（权重 10），
   供筛选器构建现货 USDT 白名单（与 BinanceApi 筛选同款：TRADING + 非稳定币标的）。
 - ``fetch_klines()``：/api/v3/klines 日线窗口（权重随 limit），

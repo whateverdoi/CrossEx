@@ -1,7 +1,7 @@
 """全局状态：15 字段 TypedDict（规格二节数据字典）。
 
 后写覆盖语义：每字段每 symbol 恰好写一次，无 reducer；
-字段来源 = 数据流（① 写四快照 / ② 写 signals / 分支写证据 / ⑧ 写工件）。
+字段来源 = 数据流（① 写四快照 / ② 写 signals / 分支写证据 / ④ 写工件）。
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ class State(TypedDict, total=False):
     microstructure_data: dict[str, dict]
     web_data: dict[str, dict]
 
-    # 扫描器快照（① collect_data 读外部 BinanceApi CSV，分支摘要参考 + ⑧ 报告渲染）
+    # 扫描器快照（① collect_data 读外部 BinanceApi CSV，分支摘要参考 + ④ 报告渲染）
     scanner_snapshot: dict
 
     # 确定性信号（② compute_signals 写入）
@@ -34,8 +34,8 @@ class State(TypedDict, total=False):
     evidence: dict[str, dict]
     rejected_evidence: dict[str, list[dict]]
 
-    # 工件层（⑧ 写入）
+    # 工件层（④ 写入）
     research_artifacts: dict[str, dict]
 
-    # 元数据（各节点追加，⑧ 消费）
+    # 元数据（各节点追加，④ 消费）
     meta: dict[str, Any]

@@ -169,6 +169,16 @@ def test_mock_collect_full_snapshot() -> None:
         "basis",
         "taker_buy_ratio_24h",
         "listing_days",
+        "rv_7d",
+        "rv_30d",
+        "drawdown_1y",
+        "vol_adj_ret_7d",
+        "vol_adj_ret_30d",
+        "beta_7d",
+        "beta_30d",
+        "alpha_7d",
+        "alpha_30d",
+        "funding_z",
         "error",
         "futures_error",
         "incomplete",
@@ -265,7 +275,6 @@ def test_mock_shared_fetched_once(monkeypatch: pytest.MonkeyPatch) -> None:
             f"{name} 应批内一次，实际 {counters[name]['n']}"
         )
     for name in (
-        "fetch_fapi_klines",
         "fetch_funding_rate_history",
         "fetch_open_interest",
         "fetch_open_interest_hist",
@@ -278,6 +287,8 @@ def test_mock_shared_fetched_once(monkeypatch: pytest.MonkeyPatch) -> None:
         assert counters[name]["n"] == len(MOCK_TOKENS), (
             f"{name} 应 per-token 6 次，实际 {counters[name]['n']}"
         )
+    # fetch_fapi_klines：per-token 6 次 + BTC 基准共享 1 次（08 票 β/宽度参照）
+    assert counters["fetch_fapi_klines"]["n"] == len(MOCK_TOKENS) + 1
     # 链类 4 个（BTC/ETH/SOL/DOGE）、协议类 2 个（UNI 静态 + XRP 兑底）
     assert counters["fetch_chain_tvl"]["n"] == 4
     assert counters["fetch_protocol_tvl"]["n"] == 2

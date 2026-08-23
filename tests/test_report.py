@@ -1,4 +1,4 @@
-"""09-10/04 票验收：⑧ 工件派生（candidates）+ 信号快照/对比 + 证据 md 渲染。
+"""09-10/04 票验收：④ 工件派生（candidates）+ 信号快照/对比 + 证据 md 渲染。
 
 09：_build_artifacts/_build_signal_diff 纯函数直接单测（04 票改信号快照语义）；
 04：证据 md（总览表 + 每 token 做多/做空表 + 剔除附录）经 _render_evidence_md
@@ -142,6 +142,17 @@ _ALL_SIGNAL_KEYS = [
     "tvl_trend_30d",
     "fees_trend_30d",
     "stablecoin_change_30d",
+    "funding_z",
+    "rv_7d",
+    "rv_30d",
+    "drawdown_1y",
+    "vol_adj_ret_7d",
+    "vol_adj_ret_30d",
+    "beta_7d",
+    "beta_30d",
+    "alpha_7d",
+    "alpha_30d",
+    "turnover",
 ]
 
 

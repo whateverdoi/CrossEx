@@ -11,6 +11,7 @@ import os
 
 from strategy_research import env
 from strategy_research.graph import build_graph
+from strategy_research.scanner_snapshot import ENV_AUTO, refresh_if_stale
 from strategy_research.screener import DEFAULT_RULES, select_tokens
 
 
@@ -41,11 +42,17 @@ def _resolve_tokens(args: argparse.Namespace) -> tuple[list[str], dict]:
 
 
 def main(argv: list[str] | None = None) -> dict:
-    """主流程：解析 tokens → 建图 → invoke → 返回 meta（含 report_path）。"""
+    """主流程：扫描器快照新鲜度检查 → 解析 tokens → 建图 → invoke → meta。
+
+    非 mock 模式且 SR_SCAN_AUTO 未关闭时，快照陈旧会自动补跑扫描器（子进程），
+    用户无需手动操作；补跑结果写入 meta["scanner"]（run.json 落盘）。
+    """
     env.reset_call_counts()  # 每次运行计数从 0 开始（llm_calls = 本次运行）
     args = parse_args(argv)
     tokens, screening = _resolve_tokens(args)
-    meta = {"screening": screening}
+    meta: dict = {"screening": screening}
+    if not env.is_mock_mode() and os.environ.get(ENV_AUTO, "1") != "0":
+        meta["scanner"] = refresh_if_stale()
     app = build_graph()
     result = app.invoke({"tokens": tokens, "meta": meta})
     return result["meta"]

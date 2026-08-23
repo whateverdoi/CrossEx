@@ -18,7 +18,8 @@ from typing import Any
 #: sentiment 解读规则锚点（与分支 prompt 一致）
 SENTIMENT_NOTE = (
     "持仓指标原始直读；解读规则：funding 高=拥挤反向，多空比高=偏多；"
-    "funding_pctile_90d 高分位=费率极端拥挤；oi_price_divergence 同向=趋势确认，背离=弱势"
+    "funding_pctile_90d 高分位=费率极端拥挤；funding_z 高=费率相对主流更拥挤（多拥挤），"
+    "funding_z 低=费率相对主流更低（空拥挤）；oi_price_divergence 同向=趋势确认，背离=弱势"
 )
 
 
@@ -33,7 +34,7 @@ _BRANCH_RULES = (
     "2. 每条证据必须包含：claim（主张）、basis（结构化数据引用三元组：domain 数据域 / "
     "field 点号路径 / value 引用时点的快照值，逐字来自输入）、source（与 basis.domain 一致）。\n"
     "3. basis.domain 只能取数据域白名单之一：signals / market_data / fundamental_data / "
-    "microstructure_data / web_data / scanner_snapshot；禁止使用数据源名（binance / "
+    "microstructure_data / web_data / scanner_snapshot / market_env；禁止使用数据源名（binance / "
     "binance_futures / defillama / bing 等）或节标题（市场/基本面/新闻）作为 domain。\n"
     "4. basis.field 必须引用到输入中的标量层（含 .value 后缀），如 momentum.value、"
     "divergence.value.quadrant、sentiment.components.funding、tvl.value、"
@@ -50,8 +51,9 @@ _BRANCH_OUTPUT = (
     "8. claim 中出现的每个数值必须来自其 basis 引用的字段（允许该字段的派生"
     "表述），禁止把其他字段的数值归因到本字段（如把全账户多空比变化说成"
     "顶级账户变化），禁止使用输入中不存在的计算值（如比率换算、合成指标）。\n"
-    "9. 数量 1-8 条，按重要性降序；充分挖掘摘要中的独立事实，有几条写几条，"
-    "禁止凑满上限——禁止把同一事实拆成多条（如同一 claim 换 basis 重复引用）。\n"
+    "9. 数量不限，按重要性降序；充分挖掘摘要中的独立事实，有几条写几条，"
+    "不设上限——但每条必须独立有据：禁止把同一事实拆成多条（如同一 claim "
+    "换 basis 重复引用），禁止无依据凑数。\n"
     '10. 输出 JSON：{"evidence": [{"claim": "...", "basis": '
     '{"domain": "...", "field": "...", "value": "..."}, '
     '"source": "..."}]}。'
@@ -142,6 +144,22 @@ def _signal_lines(symbol: str, state: dict) -> list[str]:
                 )
     else:
         lines.append("sentiment: UNKNOWN")
+    mm = (sig.get("market_metrics") or {}).get("value") or {}
+    if mm:
+        lines.extend(f"market_metrics.value.{k}: {_num_text(v)}" for k, v in mm.items())
+    else:
+        lines.append("market_metrics: UNKNOWN")
+    return lines
+
+
+def _market_env_lines(state: dict) -> list[str]:
+    """市场环境节（08 票：全市场宽度聚合，分支摘要头部，域=market_env）。"""
+    env = (state.get("meta") or {}).get("market_env") or {}
+    lines = ["== 市场环境（market_env，全市场聚合）=="]
+    if not env:
+        lines.append("UNKNOWN")
+        return lines
+    lines.extend(f"market_env.{k}: {_num_text(v)}" for k, v in env.items())
     return lines
 
 
@@ -149,7 +167,7 @@ def _facts_summary_lines(symbol: str, state: dict) -> list[str]:
     """确定性快照 → LLM 摘要骨架（分支摘要共用）。
 
     只喂数字 + 变化率 + source 标签（含微观结构节）；缺失一律 UNKNOWN；
-    新闻 ≤3 条；总行数 ≤50（约 1200 token/token，规格 ③-1）。
+    新闻 ≤3 条；总行数 ≤50（约 1200 token/token，规格 分支节-1）。
     """
     fund = (state.get("fundamental_data") or {}).get(symbol) or {}
     mkt = (state.get("market_data") or {}).get(symbol) or {}
@@ -266,5 +284,10 @@ def build_branch_summary(symbol: str, state: dict) -> str:
     两分支各自从同一份确定性快照提取证据，不含任何决策产物（05 票）。
     """
     return "\n".join(
-        [*_facts_summary_lines(symbol, state), "", "只提取证据，禁止结论。"]
+        [
+            *_market_env_lines(state),
+            *_facts_summary_lines(symbol, state),
+            "",
+            "只提取证据，禁止结论。",
+        ]
     )

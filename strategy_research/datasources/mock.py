@@ -45,6 +45,19 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def _day_open_ms() -> int:
+    """当日 00:00 UTC 毫秒（mock 日线 open_time 基准）。
+
+    同日多次调用同值（不用 _now_ms）：跨序列按 open_time 对齐的场景
+    （signals.beta_alpha 等）要求两次 mock_klines 调用的时间戳严格一致，
+    毫秒级错开会把交集清空。
+    """
+    now = datetime.now(timezone.utc)
+    return int(
+        datetime(now.year, now.month, now.day, tzinfo=timezone.utc).timestamp() * 1000
+    )
+
+
 def _iso_days_ago(days: int) -> str:
     """ISO 8601 时间戳（N 天前），与 web 真实条目 date 字段同构。"""
     ts = datetime.now(timezone.utc).timestamp() - days * 86_400
@@ -78,10 +91,12 @@ def mock_klines(symbol: str, interval: str = "1d", limit: int = 365) -> list[dic
     """日线窗口（与 fetch_klines 同构）：价格绕基准小幅波动。"""
     price = _price(symbol)
     step_days = {"1d": 1, "4h": 1 / 6, "1h": 1 / 24}.get(interval, 1)
-    # open_time 毫秒级（与真实 fetch_klines 的 int(k[0]) 同构）
+    # open_time 毫秒级（与真实 fetch_klines 的 int(k[0]) 同构；日界基准保证
+    # 同日多次调用时间戳一致，供 beta_alpha 等跨序列对齐）
+    base = _day_open_ms()
     return [
         {
-            "open_time": _now_ms() - i * int(86_400_000 * step_days),
+            "open_time": base - i * int(86_400_000 * step_days),
             "close_price": round(price * (1 + 0.001 * (i % 7)), 6),
         }
         for i in range(max(1, limit))
@@ -514,6 +529,33 @@ def _oi_price_divergence(symbol: str) -> dict:
     return oi_price_divergence(_price_change_24h(symbol), _oi_change_24h(symbol))
 
 
+def _funding_z(symbol: str) -> float | None:
+    """mock 费率横截面 Z（同真实路径：mock premium 全 0.0001 → 参照系无离散 → 0.0）。"""
+    from ..signals import funding_cross_sectional_z  # 延迟导入避免循环
+
+    rates = {
+        r["symbol"]: r["last_funding_rate"] for r in mock_premium_index_all()
+    }
+    return funding_cross_sectional_z(rates, f"{symbol}USDT")
+
+
+def _mock_market_metrics(symbol: str, kind: str | None) -> dict:
+    """mock 市场派生指标：从 mock klines / ticker 推导，复用同一纯函数（同构纪律）。"""
+    from ..signals import beta_alpha, market_metrics, volatility_metrics  # 延迟导入
+
+    klines = mock_klines(symbol, "1d", 400)
+    vol = volatility_metrics(klines)["value"]
+    ba = beta_alpha(klines, mock_klines("BTCUSDT", "1d", 400))["value"]
+    ticker = mock_fapi_ticker_24h_all().get(f"{symbol}USDT") or {}
+    return market_metrics(
+        {"mcap": {"value": _MOCK_MCAP if kind == "protocol" else None}},
+        {
+            "quote_volume_24h": {"value": ticker.get("quote_volume")},
+            **{k: {"value": v} for k, v in {**vol, **ba}.items()},
+        },
+    )
+
+
 def mock_signals_data(symbol: str, kind: str | None = None) -> dict:
     """② 信号层 mock：值从 mock 数据源推导，与同一快照上的纯函数输出一致。
 
@@ -549,8 +591,10 @@ def mock_signals_data(symbol: str, kind: str | None = None) -> dict:
                 "funding_trend": _funding_trend(symbol),
                 "funding_pctile_90d": _funding_pctile_90d(symbol),
                 "oi_price_divergence": _oi_price_divergence(symbol),
+                "funding_z": _funding_z(symbol),
             },
             "note": SENTIMENT_NOTE,
         },
+        "market_metrics": _mock_market_metrics(symbol, kind),
         "error": None,
     }

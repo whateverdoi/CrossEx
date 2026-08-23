@@ -177,7 +177,7 @@ def select_tokens(rules: list[ScreenRule], top_n: int = 10) -> ScreeningResult:
 | 全量快照拉取失败（网络/5xx/解析） | `ScreeningError` 抛给 `main`，批终止、显式报错；不回退 mock、不静默产出空批 |
 | 单条 symbol 字段缺失 | 该行标 UNKNOWN，规则对 UNKNOWN 保守排除（如 `listing_days_lt` 对 UNKNOWN 不通过） |
 
-**输出**：`tokens`（图输入）+ `meta.screening`（`mode / rules / candidates[{symbol, reason, metrics}]`，⑧ 渲染“币种筛选”节，报告可审计“为什么选这 N 个”）。
+**输出**：`tokens`（图输入）+ `meta.screening`（`mode / rules / candidates[{symbol, reason, metrics}]`，④ 渲染“币种筛选”节，报告可审计“为什么选这 N 个”）。
 
 ### ① collect_data — 确定性数据收集
 

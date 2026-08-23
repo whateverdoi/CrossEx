@@ -93,7 +93,7 @@ class EvidenceItem(BaseModel):
 
 
 class BranchOutput(BaseModel):
-    """分支单次结构化输出：evidence 列表（按重要性降序，上限 8 条，截断在节点层）。"""
+    """分支单次结构化输出：evidence 列表（按重要性降序，数量不设上限）。"""
 
     evidence: list[EvidenceItem] = Field(
         default_factory=list, description="证据列表（按重要性降序）"
@@ -201,6 +201,8 @@ def _verify_item(
     expected = _text(basis.get("value"))
     if domain == "scanner_snapshot":  # field 自带完整路径（market.BTC.price）
         root: Any = state.get("scanner_snapshot") or {}
+    elif domain == "market_env":  # 全市场聚合（meta 级，非 per-token）
+        root = (state.get("meta") or {}).get("market_env") or {}
     elif domain in _DOMAIN_KEYS:
         root = (state.get(domain) or {}).get(symbol) or {}
     else:

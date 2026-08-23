@@ -1,4 +1,4 @@
-"""图组装（03 票）：START → ① → ② → [bull_research ‖ bear_research] → evidence_verify → ⑧ → END。
+"""图组装（03 票）：START → ① → ② → [bull_research ‖ bear_research] → evidence_verify → ④ → END。
 
 两分支为并行边（fan-out/fan-in，无 reducer）：同消费冻结快照、各写各的字段
 （bull_evidence / bear_evidence），后写覆盖语义不变；无条件路由 / Command /
