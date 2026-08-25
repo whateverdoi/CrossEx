@@ -212,9 +212,11 @@ def _age_days(day: str) -> int | None:
     return (datetime.now(timezone.utc).date() - d).days
 
 
-def refresh_if_stale(max_age_days: int = 1) -> dict:
-    """快照陈旧自动补跑：陈旧（距今天 > max_age_days）→ 子进程调扫描器 → 重新加载。
+def refresh_if_stale(max_age_days: int = 0) -> dict:
+    """快照陈旧自动补跑：陈旧（非当天）→ 子进程调扫描器 → 重新加载。
 
+    默认 max_age_days=0：快照必须是当天（UTC）才算新鲜，昨天及更早一律
+    补跑——每日报告不应展示昨日快照；扫描器补跑失败沿用旧快照并留痕。
     返回 meta 信息（供 run.json 落盘）：
 
     - 快照不可用 → ``{"status": "unavailable"}``

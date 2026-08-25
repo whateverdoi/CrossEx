@@ -18,6 +18,7 @@ from strategy_research.env import (
     LIVE_CALL_COUNTS,
     is_mock_mode,
 )
+from strategy_research.scanner_snapshot import _strip_quote
 
 
 def _write_json(path: Path, obj: dict) -> None:
@@ -64,6 +65,13 @@ def build_report(state: dict, meta: dict) -> tuple[Path, dict]:
     }
     if meta.get("scanner") is not None:  # 仅真实模式（main 注入补跑状态）落盘
         run_meta["scanner"] = meta["scanner"]
+    # 分支异常留痕（06 票补漏：LLM 失败/空证据可诊断，不再黑盒）
+    run_meta["bull_errors"] = state.get("bull_errors") or {}
+    run_meta["bear_errors"] = state.get("bear_errors") or {}
+    if meta.get("incomplete_tokens"):
+        run_meta["incomplete_tokens"] = meta["incomplete_tokens"]
+    if meta.get("scan_error"):
+        run_meta["scan_error"] = meta["scan_error"]
     run = {
         "meta": run_meta,
         "evidence": state.get("evidence") or {},
@@ -180,6 +188,7 @@ def _build_data_snapshot(state: dict) -> dict:
     scanner = state.get("scanner_snapshot") or {}
     snap: dict[str, dict] = {}
     for s in state["tokens"]:
+        base = _strip_quote(s)  # 快照 key 为裸符号，消费点对齐命名空间
         snap[s] = {
             "signals": (state.get("signals") or {}).get(s) or {},
             "market_data": (state.get("market_data") or {}).get(s) or {},
@@ -189,8 +198,9 @@ def _build_data_snapshot(state: dict) -> dict:
             "web_data": (state.get("web_data") or {}).get(s) or {},
             "scanner_snapshot": {
                 "date": scanner.get("date"),
-                "market": (scanner.get("market") or {}).get(s) or {},
-                "microstructure": (scanner.get("microstructure") or {}).get(s) or {},
+                "market": (scanner.get("market") or {}).get(base) or {},
+                "microstructure": (scanner.get("microstructure") or {}).get(base)
+                or {},
             },
         }
     return snap
@@ -264,13 +274,22 @@ def _price_text(value) -> str:
 
 
 def _evidence_section_lines(
-    symbol: str, ev: dict, scan_date: str | None = None
+    symbol: str,
+    ev: dict,
+    scan_date: str | None = None,
+    errors: dict | None = None,
 ) -> list[str]:
     """单 token 证据节：### 做多证据 / ### 做空证据 两张表（# | claim | basis | source）。
 
-    scan_date：扫描器快照日期（存在时在节头标注，防旧快照被误读为实时，07 票）。
+    scan_date：扫描器快照日期（存在时在节头标注，防旧快照被误读为实时，07 票）；
+    errors：{side: 错误消息}（LLM 失败/空证据留痕，非空时节头标注，不再静默 0 证据）。
     """
     lines = [f"## {symbol}", ""]
+    if errors:
+        for side, msg in errors.items():
+            if msg:
+                label = "做多" if side == "bull" else "做空"
+                lines += [f"- {label}分支异常：{msg}", ""]
     if scan_date:
         lines += [f"- 扫描器快照日期：{scan_date}", ""]
     for title, items in (
@@ -324,6 +343,15 @@ def _render_evidence_md(state: dict, run: dict) -> str:
     evidence = state.get("evidence") or {}
     rejected = state.get("rejected_evidence") or {}
     meta = run["meta"]
+    # 分支异常合并：{symbol: {"bull": msg, "bear": msg}}（空/无 → 不标注）
+    branch_errors: dict[str, dict] = {}
+    for s in state["tokens"]:
+        e = {
+            side: (meta.get(f"{side}_errors") or {}).get(s)
+            for side in ("bull", "bear")
+        }
+        if any(e.values()):
+            branch_errors[s] = e
     lines = [
         "# 证据报告",
         "",
@@ -352,6 +380,7 @@ def _render_evidence_md(state: dict, run: dict) -> str:
             s,
             evidence.get(s) or {},
             ((state.get("scanner_snapshot") or {}).get("date")),
+            branch_errors.get(s),
         )
     lines += _rejected_lines(rejected, state["tokens"])
     return "\n".join(lines)

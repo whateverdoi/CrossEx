@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import csv
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -181,6 +181,24 @@ def test_refresh_fresh_skips_subprocess(tmp_path, monkeypatch):
     assert info["status"] == "fresh"
     assert info["date"] == today
     assert not called  # 未触发补跑
+
+
+def test_refresh_yesterday_triggers_by_default(tmp_path, monkeypatch):
+    """默认 max_age_days=0：昨天快照即视为陈旧，自动补跑当天数据。"""
+    yesterday = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
+    d = _scan_dir(tmp_path, date=yesterday)
+    monkeypatch.setenv(scan.ENV_DIR, str(d))
+    seen = {}
+
+    def fake_run(cmd, **k):
+        seen["called"] = True
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    info = scan.refresh_if_stale()  # 不传 max_age_days（默认 0）
+    assert seen.get("called")  # 昨天快照 → 触发补跑
+    assert info["status"] in ("refreshed", "failed")
+    assert info.get("date") == yesterday
 
 
 def test_refresh_stale_runs_scanner(tmp_path, monkeypatch):

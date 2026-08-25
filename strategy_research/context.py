@@ -112,6 +112,15 @@ def _snap_pct(value: Any) -> str:
     return "UNKNOWN" if not isinstance(value, (int, float)) else f"{value:.2f}%"
 
 
+def _snap_key(symbol: str) -> str:
+    """扫描器快照查询 key = 裸符号（与 scanner_snapshot._strip_quote 同构）。
+
+    scanner_snapshot 在数据源边界已归一化为裸符号（AKEUSDT → AKE，与
+    defillama 命名空间一致）；state.tokens 为全符号，此处消费点对齐。
+    """
+    return symbol.removesuffix("USDT")
+
+
 def _signal_lines(symbol: str, state: dict) -> list[str]:
     """信号节渲染（分支摘要共用）：行前缀 = 完整域内路径（06 票）。
 
@@ -231,8 +240,9 @@ def _facts_summary_lines(symbol: str, state: dict) -> list[str]:
         + (f"（{imb['note']}）" if imb.get("note") else "")
     )
     snap = state.get("scanner_snapshot") or {}
-    msnap = (snap.get("market") or {}).get(symbol) or {}
-    micsnap = (snap.get("microstructure") or {}).get(symbol) or {}
+    base = _snap_key(symbol)  # 快照 key 为裸符号，消费点对齐命名空间
+    msnap = (snap.get("market") or {}).get(base) or {}
+    micsnap = (snap.get("microstructure") or {}).get(base) or {}
     if msnap or micsnap:  # 快照缺失 → 跳过该节，仅确定性信号照常
         day = snap.get("date") or "未知"
         lines += [
@@ -242,38 +252,38 @@ def _facts_summary_lines(symbol: str, state: dict) -> list[str]:
         if msnap:
             boards = "、".join(msnap.get("boards") or []) or "UNKNOWN"
             lines.append(
-                f"market.{symbol}.price: {_snap_num(msnap.get('price'), 6)}"
-                f" market.{symbol}.quote_volume_24h: {_snap_num(msnap.get('quote_volume_24h'))}"
-                f" market.{symbol}.open_interest_value: {_snap_num(msnap.get('open_interest_value'))}"
+                f"market.{base}.price: {_snap_num(msnap.get('price'), 6)}"
+                f" market.{base}.quote_volume_24h: {_snap_num(msnap.get('quote_volume_24h'))}"
+                f" market.{base}.open_interest_value: {_snap_num(msnap.get('open_interest_value'))}"
             )
             lines.append(
-                f"market.{symbol}.ret_1h: {_snap_pct(msnap.get('ret_1h'))}"
-                f" market.{symbol}.ret_4h: {_snap_pct(msnap.get('ret_4h'))}"
-                f" market.{symbol}.ret_24h: {_snap_pct(msnap.get('ret_24h'))}"
-                f" market.{symbol}.ret_7d: {_snap_pct(msnap.get('ret_7d'))}"
-                f" market.{symbol}.price_change_pct_24h: {_snap_pct(msnap.get('price_change_pct_24h'))}"
+                f"market.{base}.ret_1h: {_snap_pct(msnap.get('ret_1h'))}"
+                f" market.{base}.ret_4h: {_snap_pct(msnap.get('ret_4h'))}"
+                f" market.{base}.ret_24h: {_snap_pct(msnap.get('ret_24h'))}"
+                f" market.{base}.ret_7d: {_snap_pct(msnap.get('ret_7d'))}"
+                f" market.{base}.price_change_pct_24h: {_snap_pct(msnap.get('price_change_pct_24h'))}"
             )
             lines.append(
-                f"market.{symbol}.funding_rate: {_snap_num(msnap.get('funding_rate'), 6)}"
-                f" market.{symbol}.futures_premium_pct: {_snap_pct(msnap.get('futures_premium_pct'))}"
-                f" market.{symbol}.listing_days: {_snap_num(msnap.get('listing_days'), 1)}"
-                f" market.{symbol}.onboard_date: {msnap.get('onboard_date') or 'UNKNOWN'}"
-                f" market.{symbol}.boards: {boards}"
+                f"market.{base}.funding_rate: {_snap_num(msnap.get('funding_rate'), 6)}"
+                f" market.{base}.futures_premium_pct: {_snap_pct(msnap.get('futures_premium_pct'))}"
+                f" market.{base}.listing_days: {_snap_num(msnap.get('listing_days'), 1)}"
+                f" market.{base}.onboard_date: {msnap.get('onboard_date') or 'UNKNOWN'}"
+                f" market.{base}.boards: {boards}"
             )
         if micsnap:
             lines.append(
-                f"microstructure.{symbol}.oi_change_24h: {_snap_pct(micsnap.get('oi_change_24h'))}"
-                f" microstructure.{symbol}.oi_change_48h: {_snap_pct(micsnap.get('oi_change_48h'))}"
-                f" microstructure.{symbol}.oi_value_change_24h: {_snap_pct(micsnap.get('oi_value_change_24h'))}"
-                f" microstructure.{symbol}.ls_ratio_all: {_snap_num(micsnap.get('ls_ratio_all'))}"
-                f" microstructure.{symbol}.ls_ratio_all_change_24h: {_snap_pct(micsnap.get('ls_ratio_all_change_24h'))}"
+                f"microstructure.{base}.oi_change_24h: {_snap_pct(micsnap.get('oi_change_24h'))}"
+                f" microstructure.{base}.oi_change_48h: {_snap_pct(micsnap.get('oi_change_48h'))}"
+                f" microstructure.{base}.oi_value_change_24h: {_snap_pct(micsnap.get('oi_value_change_24h'))}"
+                f" microstructure.{base}.ls_ratio_all: {_snap_num(micsnap.get('ls_ratio_all'))}"
+                f" microstructure.{base}.ls_ratio_all_change_24h: {_snap_pct(micsnap.get('ls_ratio_all_change_24h'))}"
             )
             lines.append(
-                f"microstructure.{symbol}.ls_ratio_top_acc: {_snap_num(micsnap.get('ls_ratio_top_acc'))}"
-                f" microstructure.{symbol}.ls_ratio_top_pos: {_snap_num(micsnap.get('ls_ratio_top_pos'))}"
-                f" microstructure.{symbol}.taker_bs_ratio: {_snap_num(micsnap.get('taker_bs_ratio'))}"
-                f" microstructure.{symbol}.funding_avg: {_snap_num(micsnap.get('funding_avg'), 6)}"
-                f" microstructure.{symbol}.funding_trend: {micsnap.get('funding_trend') or 'UNKNOWN'}"
+                f"microstructure.{base}.ls_ratio_top_acc: {_snap_num(micsnap.get('ls_ratio_top_acc'))}"
+                f" microstructure.{base}.ls_ratio_top_pos: {_snap_num(micsnap.get('ls_ratio_top_pos'))}"
+                f" microstructure.{base}.taker_bs_ratio: {_snap_num(micsnap.get('taker_bs_ratio'))}"
+                f" microstructure.{base}.funding_avg: {_snap_num(micsnap.get('funding_avg'), 6)}"
+                f" microstructure.{base}.funding_trend: {micsnap.get('funding_trend') or 'UNKNOWN'}"
             )
     lines += ["", "== 信号（signals）=="]
     lines += _signal_lines(symbol, state)
