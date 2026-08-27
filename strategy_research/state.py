@@ -13,11 +13,12 @@ class State(TypedDict, total=False):
     # 输入（⑨ 筛选器产出；SR_TOKENS 手动覆盖时跳过筛选）
     tokens: list[str]
 
-    # 确定性层四快照（① collect_data 写入）
+    # 确定性层五快照（① collect_data 写入）
     market_data: dict[str, dict]
     fundamental_data: dict[str, dict]
     microstructure_data: dict[str, dict]
     web_data: dict[str, dict]
+    social_data: dict[str, dict]
 
     # 扫描器快照（① collect_data 读外部 BinanceApi CSV，分支摘要参考 + ④ 报告渲染）
     scanner_snapshot: dict

@@ -24,6 +24,7 @@ from strategy_research.datasources import (
     okx,
 )
 from strategy_research.datasources import web as web_ds
+from strategy_research.datasources import x_social
 from strategy_research.evidence import EvidenceItem
 from strategy_research.schemas import _extract_json, _match_brace, _try_loads
 
@@ -442,7 +443,7 @@ def _web(symbol: str) -> dict:
 
 def _error_snapshots(
     symbol: str, exc: Exception | None
-) -> tuple[dict, dict, dict, dict]:
+) -> tuple[dict, dict, dict, dict, dict]:
     """异常兜底快照：全字段四元组 None，结构契约不被破坏（②③ 直读安全）。"""
     msg = f"装配异常: {exc}" if exc else "装配异常"
     fund: dict[str, Any] = {
@@ -519,7 +520,17 @@ def _error_snapshots(
         "web_error": msg,
         "incomplete": True,
     }
-    return fund, mkt, ms, web_snap
+    social_snap: dict[str, Any] = {
+        "symbol": symbol,
+        "error": msg,
+        "incomplete": True,
+        "follower_count": _dp(None, "x_social"),
+        "posts": [],
+        "post_frequency": _dp(None, "x_social"),
+        "social_heat_trend": _dp(None, "x_social"),
+        "social_price_divergence": _dp(None, "x_social"),
+    }
+    return fund, mkt, ms, web_snap, social_snap
 
 
 def _one(symbol: str, shared: dict) -> tuple[dict, dict, dict, dict]:
@@ -527,7 +538,7 @@ def _one(symbol: str, shared: dict) -> tuple[dict, dict, dict, dict]:
 
     任一步异常仅该步快照标"装配异常"，其余步骤照常（规格 ① 步骤 4）。
     """
-    fund, mkt, ms, web_snap = _error_snapshots(symbol, None)
+    fund, mkt, ms, web_snap = _error_snapshots(symbol, None)[:4]
     try:
         fund = _fund(symbol, shared)
     except Exception as exc:
@@ -548,6 +559,43 @@ def _one(symbol: str, shared: dict) -> tuple[dict, dict, dict, dict]:
     return fund, mkt, ms, web_snap
 
 
+def _social(symbol: str, mkt: dict) -> dict:
+    """社交快照：X 账号粉丝数 + 近 30 条推文互动（原样文本）+ 派生社交信号。
+
+    粉丝数/互动数保留页面原样文本（"16.3万"/"14"）；发帖频率（天/条）由推文
+    相对时间跨度派生；社交热度趋势与社交/价格背离为 signals 纯函数（同构
+    oi_price_divergence）；抓取失败全字段 UNKNOWN（失败即失败，不阻断批）。
+    """
+    base = defillama._strip_quote(symbol)
+    snap: dict[str, Any] = {"symbol": symbol, "error": None, "incomplete": False}
+    raw = x_social.fetch_x_stats(base)
+    if raw is None:
+        snap["error"] = "X 数据抓取失败"
+        snap["incomplete"] = True
+        snap["follower_count"] = _dp(None, "x_social")
+        snap["posts"] = []
+        snap["post_frequency"] = _dp(None, "x_social")
+        snap["social_heat_trend"] = _dp(None, "x_social")
+        snap["social_price_divergence"] = _dp(None, "x_social")
+        return snap
+    posts = raw.get("posts") or []
+    snap["follower_count"] = _dp(raw.get("follower_count"), "x_social")
+    snap["posts"] = [
+        {k: p.get(k) for k in ("likes", "reposts", "comments", "views", "time")}
+        for p in posts
+    ]
+    snap["post_frequency"] = _dp(x_social.post_frequency_days(posts), "x_social")
+    heat = sig_mod.social_heat_trend(posts)
+    snap["social_heat_trend"] = _dp(heat, "x_social")
+    snap["social_price_divergence"] = _dp(
+        sig_mod.social_price_divergence(
+            (mkt.get("change_24h") or {}).get("value"), heat
+        ),
+        "x_social",
+    )
+    return snap
+
+
 def _meta(state: dict) -> dict[str, Any]:
     """取 meta（不存在则初始化），并记录节点执行顺序。"""
     meta = dict(state.get("meta") or {})
@@ -556,10 +604,12 @@ def _meta(state: dict) -> dict[str, Any]:
 
 
 def collect_data(state: dict) -> dict:
-    """① 数据收集（确定性）：共享批内一次 + 并发 per-token 装配。
+    """① 数据收集（确定性）：共享批内一次 + 并发 per-token 装配 + X 抓取串行。
 
     失败即失败：数据源失败该数据点 UNKNOWN 并标记 error/incomplete，
     单 token 异常不中断批；incomplete_tokens 落 meta。
+    X 抓取（social_data）放线程池外串行——每币约 30-60 秒且需有头浏览器
+    （DISPLAY），多 Chromium 并发易被 x.com 风控/内存压力。
     """
     meta, order = _meta(state)
     order.append("collect_data")
@@ -581,6 +631,7 @@ def collect_data(state: dict) -> dict:
     fundamental_data: dict[str, dict] = {}
     microstructure_data: dict[str, dict] = {}
     web_data: dict[str, dict] = {}
+    social_data: dict[str, dict] = {}
     incomplete: list[str] = []
     with ThreadPoolExecutor(max_workers=4) as pool:
         futures = {s: pool.submit(_one, s, shared) for s in tokens}
@@ -588,7 +639,7 @@ def collect_data(state: dict) -> dict:
             try:
                 fund, mkt, ms, web_snap = fut.result()
             except Exception as exc:  # 终极兜底（_one 步级隔离外的意外异常）
-                fund, mkt, ms, web_snap = _error_snapshots(symbol, exc)
+                fund, mkt, ms, web_snap = _error_snapshots(symbol, exc)[:4]
             market_data[symbol] = mkt
             fundamental_data[symbol] = fund
             microstructure_data[symbol] = ms
@@ -600,12 +651,21 @@ def collect_data(state: dict) -> dict:
                 or web_snap.get("incomplete")
             ):
                 incomplete.append(symbol)
+    # X 抓取串行（有头浏览器，每币约 30-60 秒；失败降级 UNKNOWN 不阻断）
+    for symbol in tokens:
+        try:
+            social_data[symbol] = _social(symbol, market_data.get(symbol) or {})
+        except Exception as exc:  # 终极兜底
+            social_data[symbol] = _error_snapshots(symbol, exc)[4]
+        if social_data[symbol].get("incomplete") and symbol not in incomplete:
+            incomplete.append(symbol)
     meta["incomplete_tokens"] = incomplete
     return {
         "market_data": market_data,
         "fundamental_data": fundamental_data,
         "microstructure_data": microstructure_data,
         "web_data": web_data,
+        "social_data": social_data,
         "scanner_snapshot": scanner_snapshot,
         "meta": meta,
     }
@@ -630,12 +690,13 @@ def compute_signals(state: dict) -> dict:
                 fund = state.get("fundamental_data", {}).get(symbol)
                 mkt = state.get("market_data", {}).get(symbol)
                 ms = state.get("microstructure_data", {}).get(symbol)
+                soc = state.get("social_data", {}).get(symbol)
                 signals_out[symbol] = {
                     "symbol": symbol,
                     "valuation": sig_mod.valuation_ratios(fund, mkt),
                     "momentum": sig_mod.momentum_score(fund),
                     "divergence": sig_mod.divergence(fund, mkt),
-                    "sentiment": sig_mod.sentiment_raw(mkt, ms),
+                    "sentiment": sig_mod.sentiment_raw(mkt, ms, soc),
                     "market_metrics": sig_mod.market_metrics(fund, mkt),
                     "error": None,
                 }

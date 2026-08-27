@@ -14,7 +14,8 @@ from strategy_research.datasources import mock as m
 from strategy_research.datasources.mock import MOCK_TOKENS
 
 #: sentiment components 字段集（规格 ② 6 字段 + 票 05 的 ls_ratio_top_acc
-#: + 票 14 的 funding_pctile_90d / oi_price_divergence + 票 08 的 funding_z）
+#: + 票 14 的 funding_pctile_90d / oi_price_divergence + 票 08 的 funding_z
+#: + social_data 的 social_heat_trend / social_price_divergence）
 _COMPONENT_KEYS = {
     "funding",
     "funding_pctile_90d",
@@ -26,6 +27,8 @@ _COMPONENT_KEYS = {
     "oi_change_24h",
     "oi_price_divergence",
     "funding_z",
+    "social_heat_trend",
+    "social_price_divergence",
 }
 
 
@@ -306,6 +309,8 @@ def test_sentiment_raw() -> None:
             "note": "价涨 OI 增：新多进场，趋势确认",
         },
         "funding_z": 0.5,
+        "social_heat_trend": None,  # 未传 soc → None（UNKNOWN 纪律）
+        "social_price_divergence": None,
     }
     assert "funding 高=拥挤反向" in s["note"]  # 注记内嵌解读规则（05 票：不再指向已退役 prompt）
     # 缺失
@@ -318,6 +323,17 @@ def test_sentiment_raw() -> None:
     assert s3["components"]["ls_ratio_all"] is None
     s4 = sig.sentiment_raw(_mkt(), {"ls_ratio_all": "oops"})
     assert s4["components"]["ls_ratio_all"] is None
+    # 社交快照直读：热度和背离标签原样透出
+    s5 = sig.sentiment_raw(
+        _mkt(),
+        _ms(),
+        {
+            "social_heat_trend": _dp(217.0),
+            "social_price_divergence": _dp({"label": "confirm_long", "note": "x"}),
+        },
+    )
+    assert s5["components"]["social_heat_trend"] == 217.0
+    assert s5["components"]["social_price_divergence"]["label"] == "confirm_long"
 
 
 # ── 趋势特征（01 票：历史序列确定性提炼） ────────────────
@@ -594,11 +610,12 @@ def test_mock_signals_consistent_with_pure_functions() -> None:
         fund = state["fundamental_data"][symbol]
         mkt = state["market_data"][symbol]
         ms = state["microstructure_data"][symbol]
+        soc = state.get("social_data", {}).get(symbol)
         want = {
             "valuation": sig.valuation_ratios(fund, mkt),
             "momentum": sig.momentum_score(fund),
             "divergence": sig.divergence(fund, mkt),
-            "sentiment": sig.sentiment_raw(mkt, ms),
+            "sentiment": sig.sentiment_raw(mkt, ms, soc),
             "market_metrics": sig.market_metrics(fund, mkt),
         }
         got = m.mock_signals_data(symbol, fund["kind"])

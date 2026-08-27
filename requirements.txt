@@ -1,0 +1,16 @@
+# CryptoResearch 运行依赖
+langgraph
+langchain
+langchain-core
+langchain-deepseek
+binance-common
+binance-sdk-spot
+binance-sdk-derivatives-trading-usds-futures
+python-dotenv
+httpx
+pydantic
+browser-use
+playwright
+
+# 测试依赖
+pytest

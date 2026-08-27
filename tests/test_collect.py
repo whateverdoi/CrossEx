@@ -102,6 +102,10 @@ _PATCH_TARGETS: dict[str, tuple[str, object]] = {
         "strategy_research.nodes.web_ds.fetch_news_rss",
         lambda q, **kw: m.mock_news_rss(q),
     ),
+    "fetch_x_stats": (
+        "strategy_research.nodes.x_social.fetch_x_stats",
+        lambda sym, *a, **kw: m.mock_x_stats(sym),
+    ),
 }
 
 #: 共享资源（批内一次，与 token 数无关）

@@ -26,6 +26,7 @@ _DOMAIN_KEYS = (
     "fundamental_data",
     "microstructure_data",
     "web_data",
+    "social_data",
 )
 
 _NULLISH = {"", "null", "none", "nan", "nil", "-"}
@@ -41,6 +42,7 @@ _LEGACY_FIELD_PREFIXES = (
     "binance_futures",
     "binance",
     "fundamental",
+    "x_social",
 )
 
 

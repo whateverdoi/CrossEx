@@ -129,6 +129,33 @@ class TestBranchSummaryContract:
         summary = context.build_branch_summary("BTC", _state_with())
         assert field in summary, f"分支 prompt 引用 {field}，但摘要未渲染"
 
+    def test_social_section_renders_aggregate_only(self):
+        """社交节只渲染确定性整体指标（粉丝数/发帖频率/热度趋势/背离），
+        不渲染单条推文 posts[i] 明细——LLM 只能引用整体趋势（compute_signals 产物）。"""
+        state = _state_with()
+        state["social_data"] = {
+            "BTC": {
+                "follower_count": _dp("16.6万"),
+                "posts": [
+                    {"likes": "120", "reposts": "30", "comments": "18", "views": "5200", "time": "2h"},
+                    {"likes": "40", "reposts": "8", "comments": "5", "views": "2100", "time": "1d"},
+                ],
+                "post_frequency": _dp(0.5),
+                "social_heat_trend": _dp(217.0),
+                "social_price_divergence": _dp(
+                    {"label": "confirm_long", "note": "价涨社区热度升：趋势确认"}
+                ),
+            }
+        }
+        summary = context.build_branch_summary("BTC", state)
+        assert "== 社交（social_data）==" in summary
+        assert "follower_count.value: 16.6万" in summary
+        assert "post_frequency.value: 0.5 天/条" in summary
+        assert "social_heat_trend.value: 217.0" in summary
+        assert "social_price_divergence.value.label: confirm_long" in summary
+        assert "social_price_divergence.value.note: 价涨社区热度升：趋势确认" in summary
+        assert "posts[" not in summary  # 单条推文明细不渲染（用户契约：整体趋势）
+
     def test_branch_summary_is_deterministic_snapshot(self):
         """分支摘要 = 纯确定性快照：信号节 + 指令行，无任何决策链产物。"""
         summary = context.build_branch_summary("BTC", _state_with())

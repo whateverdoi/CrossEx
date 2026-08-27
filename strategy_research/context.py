@@ -21,7 +21,8 @@ SENTIMENT_NOTE = (
     "funding_pctile_90d 高分位=费率极端拥挤；funding_z 高=费率相对主流更拥挤（多拥挤），"
     "funding_z 低=费率相对主流更低（空拥挤）；oi_price_divergence 同向=趋势确认，背离=弱势；"
     "爆仓失衡比高=多头爆仓主导（下行压力），低=空头爆仓主导（回补反弹压力）；"
-    "爆仓额/OI 比高=强平风险集中"
+    "爆仓额/OI 比高=强平风险集中；social_heat_trend 高=社区热度上升，低=退潮；"
+    "social_price_divergence 同向=趋势确认，背离=缺社区支撑"
 )
 
 
@@ -36,11 +37,12 @@ _BRANCH_RULES = (
     "2. 每条证据必须包含：claim（主张）、basis（结构化数据引用三元组：domain 数据域 / "
     "field 点号路径 / value 引用时点的快照值，逐字来自输入）、source（与 basis.domain 一致）。\n"
     "3. basis.domain 只能取数据域白名单之一：signals / market_data / fundamental_data / "
-    "microstructure_data / web_data / scanner_snapshot / market_env；禁止使用数据源名（binance / "
-    "binance_futures / defillama / bing 等）或节标题（市场/基本面/新闻）作为 domain。\n"
+    "microstructure_data / web_data / social_data / scanner_snapshot / market_env；禁止使用数据源名（binance / "
+    "binance_futures / defillama / bing / x_social 等）或节标题（市场/基本面/新闻/社交）作为 domain。\n"
     "4. basis.field 必须引用到输入中的标量层（含 .value 后缀），如 momentum.value、"
     "divergence.value.quadrant、sentiment.components.funding、tvl.value、"
-    "oi_change_24h.value；扫描器快照节字段自带完整路径（如 market.{SYMBOL}.price）。\n"
+    "oi_change_24h.value；社交节推文序列为裸字段（posts[0].likes，无 .value 后缀）；"
+    "扫描器快照节字段自带完整路径（如 market.{SYMBOL}.price）。\n"
     "5. basis.value 必须逐字引用输入中该字段的显示值，禁止改写、重算或四舍五入。\n"
     "6. 只提取"
 )
@@ -296,6 +298,25 @@ def _facts_summary_lines(symbol: str, state: dict) -> list[str]:
             f"items[{i}].title: {it.get('title') or 'UNKNOWN'}"
             f"（date: {it.get('date') or 'UNKNOWN'}，source: {it.get('source') or 'UNKNOWN'}）"
         )
+    lines += ["", "== 社交（social_data）=="]
+    soc = (state.get("social_data") or {}).get(symbol) or {}
+    fc = (soc.get("follower_count") or {}).get("value")
+    pf = (soc.get("post_frequency") or {}).get("value")
+    lines.append(
+        f"follower_count.value: {fc or 'UNKNOWN'}"
+        + (
+            f"  post_frequency.value: {pf} 天/条"
+            if pf is not None
+            else "  post_frequency: UNKNOWN"
+        )
+    )
+    # 整体趋势指标（确定性派生，非单条推文明细）：热度趋势 + 社交/价格背离
+    heat = (soc.get("social_heat_trend") or {}).get("value")
+    lines.append(f"social_heat_trend.value: {heat if heat is not None else 'UNKNOWN'}")
+    div = (soc.get("social_price_divergence") or {}).get("value") or {}
+    lines.append(f"social_price_divergence.value.label: {div.get('label') or 'UNKNOWN'}")
+    if div.get("note"):
+        lines.append(f"social_price_divergence.value.note: {div.get('note')}")
     return lines
 
 

@@ -196,6 +196,7 @@ def _build_data_snapshot(state: dict) -> dict:
             "microstructure_data": (state.get("microstructure_data") or {}).get(s)
             or {},
             "web_data": (state.get("web_data") or {}).get(s) or {},
+            "social_data": (state.get("social_data") or {}).get(s) or {},
             "scanner_snapshot": {
                 "date": scanner.get("date"),
                 "market": (scanner.get("market") or {}).get(base) or {},

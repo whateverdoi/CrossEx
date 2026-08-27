@@ -9,6 +9,8 @@
 - ``volatility_metrics`` / ``beta_alpha``：波动率家族 / β·α 分解（klines 纯算）
 - ``turnover`` / ``market_metrics``：换手率与市场派生指标汇总
 - ``market_width``：全市场宽度聚合（涨跌家数比 / 中位数 / BTC 尾窗收益）
+- ``social_heat_trend`` / ``social_price_divergence``：社交热度趋势与社交/价格背离
+  （X 社区活跃度维度，与 oi_price_divergence 同构四象限）
 
 UNKNOWN 纪律：任何输入缺失/非法 → None，绝不猜测（规格 ②）。
 """
@@ -482,11 +484,63 @@ def oi_price_divergence(
     return {"label": "weak_short", "note": "价跌 OI 缩：存量平仓驱动，趋势健康度弱"}
 
 
-def sentiment_raw(mkt: dict | None, ms: dict | None = None) -> dict:
+def social_heat_trend(posts: list[dict] | None) -> float | None:
+    """社交热度变化：最近 5 条均值 vs 其余中位数的互动强度比 - 1（%）。
+
+    posts 为 X 互动序列（时间升序，最新在末尾），每条含 likes/reposts/comments
+    原样文本（如 "14" / "120"）；互动强度 = likes + reposts + comments（views
+    是触达非互动，不计）；中位数抗单条爆款脉冲；样本 <7 条（其余侧 <2）或任一侧
+    无有效数值 → None（UNKNOWN 纪律）。门槛取小样本兼容：未登录 x.com profile
+    页仅渲染约 5-7 条推文（登录墙截断），≥7 条即可算最近 5 条 vs 其余 2 条中位数。
+    """
+    from .datasources.x_social import parse_compact_number  # 延迟导入避免循环
+
+    if not posts or len(posts) < 7:
+        return None
+
+    def _eng_sum(p: dict) -> float:
+        vals = [parse_compact_number(p.get(k)) for k in ("likes", "reposts", "comments")]
+        vals = [v for v in vals if v is not None]
+        return sum(vals) if vals else 0.0
+
+    recent = [v for v in (_eng_sum(p) for p in posts[-5:]) if v > 0]
+    prior = [v for v in (_eng_sum(p) for p in posts[:-5]) if v > 0]
+    if not recent or not prior:
+        return None
+    recent_avg = sum(recent) / len(recent)
+    prior_med = sorted(prior)[len(prior) // 2]  # 中位数
+    if prior_med <= 0:
+        return None
+    return round((recent_avg / prior_med - 1.0) * 100.0, 1)
+
+
+def social_price_divergence(
+    price_ret: float | None, heat_trend: float | None
+) -> dict | None:
+    """社交/价格背离四象限：价与社区热度同向 = 趋势确认，背离 = 缺社区支撑。
+
+    confirm_long / weak_long / confirm_short / weak_short / none；
+    输入缺失 → None（UNKNOWN 纪律）；零值 → none（零值无方向）。
+    """
+    if price_ret is None or heat_trend is None:
+        return None
+    if price_ret == 0 or heat_trend == 0:
+        return {"label": "none", "note": "价格或社交热度变化为零，无法判向"}
+    if price_ret > 0 and heat_trend > 0:
+        return {"label": "confirm_long", "note": "价涨社区热度升：趋势确认，市场关注度同步"}
+    if price_ret > 0:
+        return {"label": "weak_long", "note": "价涨社区热度降：上涨缺社区支撑，持续性弱"}
+    if heat_trend > 0:
+        return {"label": "weak_short", "note": "价跌社区热度升：社区逆势活跃，可能错杀"}
+    return {"label": "confirm_short", "note": "价跌社区热度降：趋势确认，关注度同步退潮"}
+
+
+def sentiment_raw(mkt: dict | None, ms: dict | None = None, soc: dict | None = None) -> dict:
     """情绪维度：持仓指标原始值直读，不做阈值加减分。
 
     阈值离散化会丢失信息（连续值压成 ±0.25 三档），下游 LLM 按 prompt
     直接解读原始值；输入缺失的字段 → None（UNKNOWN 纪律）。
+    soc 为社交快照（social_data），直读社交热度趋势与社交/价格背离标签。
     """
     return {
         "components": {
@@ -500,6 +554,8 @@ def sentiment_raw(mkt: dict | None, ms: dict | None = None) -> dict:
             "oi_change_24h": _v(ms, "oi_change_24h"),
             "oi_price_divergence": _v(ms, "oi_price_divergence"),
             "funding_z": _v(mkt, "funding_z"),
+            "social_heat_trend": _v(soc, "social_heat_trend"),
+            "social_price_divergence": _v(soc, "social_price_divergence"),
         },
         "note": SENTIMENT_NOTE,
     }

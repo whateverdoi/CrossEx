@@ -401,6 +401,32 @@ def mock_chain_tvl(chain: str) -> dict:
     }
 
 
+# ── x_social（X 账号社交数据） ──────────────────────────
+
+#: mock 最近 5 条 / 其余推文互动（固定图案：最近显著高于其余 → 热度上升）
+_MOCK_X_RECENT = {"likes": "120", "reposts": "30", "comments": "18", "views": "5200"}
+_MOCK_X_OLDER = {"likes": "40", "reposts": "8", "comments": "5", "views": "2100"}
+
+
+def mock_x_stats(symbol: str) -> dict:
+    """X 账号社交数据 mock（与 fetch_x_stats 返回同构）。
+
+    固定 30 条互动序列（时间升序，最新在末尾）；最近 5 条互动显著高于其余
+    （热度上升图案）——信号层经同一纯函数推导出确定方向（同构纪律，不写死
+    信号层常量）；发帖间隔恒定 1 天/条（跨度 29 天）。
+    """
+    posts = []
+    for i in range(30):  # i=0 最旧（30d 前），i=29 最新（1d 前）
+        row = _MOCK_X_RECENT if i >= 25 else _MOCK_X_OLDER
+        posts.append({**row, "time": f"{30 - i}d"})
+    return {
+        "account_name": symbol,
+        "handle": symbol.lower(),
+        "follower_count": "16.3万",
+        "posts": posts,
+    }
+
+
 # ── web ───────────────────────────────────────────────────
 
 
@@ -562,6 +588,20 @@ def _funding_z(symbol: str) -> float | None:
     return funding_cross_sectional_z(rates, f"{symbol}USDT")
 
 
+def _social_heat_trend(symbol: str) -> float | None:
+    """mock 社交热度趋势（与真实路径同一纯函数：mock 30 条互动序列）。"""
+    from ..signals import social_heat_trend  # 延迟导入避免循环
+
+    return social_heat_trend(mock_x_stats(symbol)["posts"])
+
+
+def _social_price_divergence(symbol: str) -> dict | None:
+    """mock 社交/价格背离（同真实路径：mock ticker 价格变化 + mock 热度趋势）。"""
+    from ..signals import social_price_divergence  # 延迟导入避免循环
+
+    return social_price_divergence(_price_change_24h(symbol), _social_heat_trend(symbol))
+
+
 def _mock_market_metrics(symbol: str, kind: str | None) -> dict:
     """mock 市场派生指标：从 mock klines / ticker 推导，复用同一纯函数（同构纪律）。"""
     from ..signals import beta_alpha, market_metrics, volatility_metrics  # 延迟导入
@@ -615,6 +655,8 @@ def mock_signals_data(symbol: str, kind: str | None = None) -> dict:
                 "funding_pctile_90d": _funding_pctile_90d(symbol),
                 "oi_price_divergence": _oi_price_divergence(symbol),
                 "funding_z": _funding_z(symbol),
+                "social_heat_trend": _social_heat_trend(symbol),
+                "social_price_divergence": _social_price_divergence(symbol),
             },
             "note": SENTIMENT_NOTE,
         },
