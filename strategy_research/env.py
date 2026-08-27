@@ -129,7 +129,7 @@ _MOCK_BULL_JSON = """{
 _MOCK_BEAR_JSON = """{
   "evidence": [
     {"claim": "OI 24h 无增量（0.0%），缺乏新仓动能", "basis": {"domain": "signals", "field": "sentiment.components.oi_change_24h", "value": "0.0"}, "source": "signals"},
-    {"claim": "taker 主动买卖比 1.0 中性，无追涨情绪", "basis": {"domain": "signals", "field": "sentiment.components.taker_bs_ratio", "value": "1.0"}, "source": "signals"},
+    {"claim": "taker 主动买卖比 1.0 中性，无追涨情绪", "basis": {"domain": "signals", "field": "sentiment.components.taker_bs_ratio_1h", "value": "1.0"}, "source": "signals"},
     {"claim": "微观结构 OI 24h 变化 0.0%，存量换手主导", "basis": {"domain": "microstructure_data", "field": "oi_change_24h.value", "value": "0.0"}, "source": "microstructure_data"}
   ]
 }"""

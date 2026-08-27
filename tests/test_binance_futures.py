@@ -26,7 +26,10 @@ def test_mock_point_and_all_endpoints() -> None:
     assert isinstance(row["next_funding_time"], int)
 
     rows = futures.fetch_premium_index_all()
-    assert isinstance(rows, list) and len(rows) == len(MOCK_TOKENS)
+    assert isinstance(rows, list)
+    # 覆盖全部固定候选，且费率离散（横截面分位需要真实分布，不能只有候选币）
+    assert {f"{s}USDT" for s in MOCK_TOKENS} <= {r["symbol"] for r in rows}
+    assert len({r["last_funding_rate"] for r in rows}) > 1
     assert set(rows[0]) == {
         "symbol",
         "mark_price",
@@ -43,6 +46,23 @@ def test_mock_point_and_all_endpoints() -> None:
     assert all(isinstance(v, float) for v in prices.values())
 
     assert futures.fetch_open_interest(SYM) == {"symbol": SYM, "open_interest": 12345.6}
+
+
+def test_mock_order_book_shape() -> None:
+    """盘口 mock 同构：{symbol, bids, asks} 档位为 [价格, 数量] 且买卖排序正确。
+
+    ``signals.book_structure`` 依赖 bids[0] 为最优买、asks[0] 为最优卖。
+    """
+    book = futures.fetch_order_book(SYM)
+    assert book is not None
+    assert set(book) == {"symbol", "bids", "asks"}
+    assert book["symbol"] == SYM
+    assert all(len(lv) == 2 for lv in book["bids"] + book["asks"])
+    bids = [lv[0] for lv in book["bids"]]
+    asks = [lv[0] for lv in book["asks"]]
+    assert bids == sorted(bids, reverse=True)
+    assert asks == sorted(asks)
+    assert bids[0] < asks[0]
 
 
 def test_mock_fapi_ticker_24h_all() -> None:

@@ -65,9 +65,15 @@ def _iso_days_ago(days: int) -> str:
 
 
 def mock_screening_candidates() -> list[dict]:
-    """mock 筛选结果：固定候选，每条带 reason 与空 metrics。"""
+    """mock 筛选结果：固定候选，每条带 reason、空 metrics 与板块标签。"""
     return [
-        {"symbol": s, "reason": "mock 固定候选", "metrics": {}} for s in MOCK_TOKENS
+        {
+            "symbol": s,
+            "reason": "mock 固定候选",
+            "metrics": {},
+            "category": _MOCK_CATEGORIES.get(s),
+        }
+        for s in MOCK_TOKENS
     ]
 
 
@@ -118,19 +124,56 @@ def mock_mark_price(symbol: str) -> dict:
     }
 
 
+#: 横截面参照系填充合约（mock 全市场费率分布）：真实 premiumIndex 返回数百
+#: 合约且费率离散，mock 若只给固定币同值费率，``funding_cross_sectional_pctile``
+#: 会因样本数不足门槛而恒为 None——横截面维度在 mock 下完全不可测（同构纪律
+#: 要求的是**形状与量级分布**同构，不只是键名同构）。固定候选币仍取
+#: ``_MOCK_FUNDING`` 同一常量，与 sentiment mock 保持一致。
+_MOCK_FUNDING = 0.0001
+_MOCK_X_FILLER_N = 24
+
+
+def _mock_funding_rate_map() -> dict[str, float]:
+    """全市场费率表（``{symbol}USDT`` → 费率）：固定币同值 + 填充合约铺分布。"""
+    # 填充段线性铺 -0.00005 ~ +0.00015，保证分布有离散且样本数过门槛
+    span = 0.0002 / max(1, _MOCK_X_FILLER_N - 1)
+    filler = {f"TEST{i}USDT": -0.00005 + i * span for i in range(_MOCK_X_FILLER_N)}
+    return {
+        **filler,
+        **{f"{s}USDT": _MOCK_FUNDING for s in MOCK_TOKENS},
+    }
+
+
 def mock_premium_index_all() -> list[dict]:
-    """全量 premiumIndex（与 fetch_premium_index_all 同构）。"""
+    """全量 premiumIndex（与 fetch_premium_index_all 同构，含离散费率分布）。"""
     now = _now_ms()
     return [
         {
-            "symbol": f"{s}USDT",
-            "mark_price": _price(s),
-            "index_price": _price(s) * 0.999,
-            "last_funding_rate": 0.0001,
+            "symbol": symbol,
+            "mark_price": _price(symbol.removesuffix("USDT")),
+            "index_price": _price(symbol.removesuffix("USDT")) * 0.999,
+            "last_funding_rate": rate,
             "next_funding_time": now + 8 * 3_600_000,
         }
-        for s in MOCK_TOKENS
+        for symbol, rate in _mock_funding_rate_map().items()
     ]
+
+
+def mock_order_book(symbol: str, limit: int = 100) -> dict:
+    """合约盘口档位（与 fetch_order_book 同构）。
+
+    档位间距取基准价的 0.03%，100 档可完整覆盖中价两侧各 2% 的深度带
+    （``depth_band_state`` = band_complete）；真实 100 档常覆盖不满整带，
+    该分支由 ``signals.book_structure`` 单测直接覆盖。
+    """
+    px = _price(symbol)
+    step = px * 0.0003
+    qty = 1000.0
+    return {
+        "symbol": f"{symbol}USDT" if not symbol.endswith("USDT") else symbol,
+        "bids": [[px - step * i, qty] for i in range(limit)],
+        "asks": [[px + step * (i + 1), qty] for i in range(limit)],
+    }
 
 
 def mock_fapi_prices_all() -> dict[str, float]:
@@ -275,6 +318,10 @@ def mock_listing_days() -> dict[str, int]:
 # ── defillama ─────────────────────────────────────────────
 
 
+#: mock 协议板块（与 fetch_protocol_tvl 的 category 字段同构；未知 slug 用占位标签）
+_MOCK_PROTOCOL_CATEGORIES = {"uniswap": "DEX"}
+
+
 def mock_protocol_tvl(protocol: str) -> dict:
     return {
         "tvl": 1000.0 + len(protocol),
@@ -283,6 +330,7 @@ def mock_protocol_tvl(protocol: str) -> dict:
         "tvl_change_30d": 10.0,
         "mcap": 500.0,
         "fdv": 800.0,
+        "category": _MOCK_PROTOCOL_CATEGORIES.get(protocol, "Mock Category"),
     }
 
 
@@ -376,6 +424,23 @@ def mock_protocols() -> dict[str, str]:
     return {s: f"{s.lower()}-mock" for s in MOCK_TOKENS}
 
 
+#: mock 板块索引（与 fetch_protocol_categories 同构）：{SYMBOL: category}；
+#: UNI 与 ``_MOCK_PROTOCOL_CATEGORIES["uniswap"]`` 同值（同一 token 两处口径一致）
+_MOCK_CATEGORIES = {
+    "BTC": "Chain",
+    "ETH": "Chain",
+    "SOL": "Chain",
+    "UNI": "DEX",
+    "DOGE": "Payments",
+    "XRP": "Payments",
+}
+
+
+def mock_protocol_categories() -> dict[str, str]:
+    """全市场板块索引 mock（与 fetch_protocol_categories 同构，零外部请求）。"""
+    return dict(_MOCK_CATEGORIES)
+
+
 def mock_stablecoins() -> dict[str, float]:
     """全量稳定币聚合表（与 fetch_stablecoins 同构）：{链名小写: 供应量}。"""
     return {name: 1.5e9 for name in _MOCK_CHAIN_NAMES.values()}
@@ -459,11 +524,11 @@ def mock_web_rss(query: str) -> list[dict]:
 
 #: mock 持仓指标原始值中与序列无关的固定部分（序列派生值见 _mock_funding_trend）
 _MOCK_SENTIMENT_FIXED = {
-    "funding": 0.0001,
+    "funding": _MOCK_FUNDING,
     "ls_ratio_all": 1.05,
     "ls_ratio_top_acc": 1.2,
     "ls_ratio_top_pos": 1.1,
-    "taker_bs_ratio": 1.0,
+    "taker_bs_ratio_1h": 1.0,
     "oi_change_24h": 0.0,
 }
 
@@ -545,10 +610,15 @@ def _mock_valuation(symbol: str, kind: str | None) -> dict:
     }
 
 
+def _quoted(symbol: str) -> str:
+    """行情符号：入参可为裸符号或全符号（nodes 传 token 全符号，测试常传裸符号）。"""
+    return symbol if symbol.endswith("USDT") else f"{symbol}USDT"
+
+
 def _price_change_24h(symbol: str) -> float | None:
     """mock 24h 价格变化 %（与真实路径 mkt.change_24h 同源：mock ticker）。"""
     for row in mock_ticker_24h_all():
-        if row["symbol"] == f"{symbol}USDT":
+        if row["symbol"] == _quoted(symbol):
             return row["price_change_pct"]
     return None
 
@@ -578,14 +648,13 @@ def _oi_price_divergence(symbol: str) -> dict:
     return oi_price_divergence(_price_change_24h(symbol), _oi_change_24h(symbol))
 
 
-def _funding_z(symbol: str) -> float | None:
-    """mock 费率横截面 Z（同真实路径：mock premium 全 0.0001 → 参照系无离散 → 0.0）。"""
-    from ..signals import funding_cross_sectional_z  # 延迟导入避免循环
+def _funding_x_pctile(symbol: str) -> float | None:
+    """mock 费率横截面分位（同真实路径：mock 全市场费率表 → 分位）。"""
+    from ..signals import funding_cross_sectional_pctile  # 延迟导入避免循环
 
-    rates = {
-        r["symbol"]: r["last_funding_rate"] for r in mock_premium_index_all()
-    }
-    return funding_cross_sectional_z(rates, f"{symbol}USDT")
+    return funding_cross_sectional_pctile(
+        _mock_funding_rate_map(), _quoted(symbol)
+    )
 
 
 def _social_heat_trend(symbol: str) -> float | None:
@@ -654,7 +723,7 @@ def mock_signals_data(symbol: str, kind: str | None = None) -> dict:
                 "funding_trend": _funding_trend(symbol),
                 "funding_pctile_90d": _funding_pctile_90d(symbol),
                 "oi_price_divergence": _oi_price_divergence(symbol),
-                "funding_z": _funding_z(symbol),
+                "funding_x_pctile": _funding_x_pctile(symbol),
                 "social_heat_trend": _social_heat_trend(symbol),
                 "social_price_divergence": _social_price_divergence(symbol),
             },

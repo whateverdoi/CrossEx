@@ -46,8 +46,14 @@ def _state() -> dict:
         "fundamental_data": {
             "BTC": {"tvl": {"value": 1007.0}, "tvl_trend_30d": {"value": "rising"}}
         },
-        "market_data": {"BTC": {"price": {"value": 70000.0}}},
+        "market_data": {
+            "BTC": {
+                "price": {"value": 70000.0},
+                "funding": {"value": 0.00026684},  # 小量级：容差须随量级收紧
+            }
+        },
         "microstructure_data": {"BTC": {"oi_change_24h": {"value": 0.0}}},
+        "social_data": {"BTC": {"post_frequency": {"value": 3.23}}},
         "web_data": {"BTC": {"items": None}},
         "scanner_snapshot": {"market": {"BTC": {"price": 70000.0}}},
     }
@@ -218,11 +224,45 @@ def test_verify_value_tolerance() -> None:
 
 
 def test_verify_numeric_render_tolerance() -> None:
-    """渲染精度容差（06 票）：LLM 引用摘要渲染值（2 位小数等）允许小误差，防误剔。"""
-    bull = [_ev(domain="fundamental_data", field="tvl.value", value="1007.001")]
-    verified, rejected = ev.verify_evidence({"BTC": bull}, {}, _state())
+    """渲染精度容差（06 票 / 09 票改半格）：容差 = 引用精度的半个最小单位。
+
+    同精度的渲染写法差异（整数/尾零）通过；超出摘要渲染精度的「编造尾数」剔除；
+    摘要自带单位后缀的文本可引用；小量级字段（funding）容差随之收紧，
+    旧固定绝对 0.05 在该量级等于放行 100 倍单位错误。
+    """
+    for cited in ("1007", "1007.0", "1007.00"):  # 快照 1007.0 的同精度写法
+        verified, rejected = ev.verify_evidence(
+            {"BTC": [_ev(domain="fundamental_data", field="tvl.value", value=cited)]},
+            {},
+            _state(),
+        )
+        assert len(verified["BTC"]["bull_case"]) == 1, cited
+        assert rejected == {}, cited
+    # 编造尾数：摘要渲染 1007.00，引用 1007.001 不是渲染差异而是第 3 位精度编造
+    verified, rejected = ev.verify_evidence(
+        {"BTC": [_ev(domain="fundamental_data", field="tvl.value", value="1007.001")]},
+        {},
+        _state(),
+    )
+    assert verified["BTC"]["bull_case"] == []
+    assert rejected["BTC"][0]["reason"].startswith("值不一致")
+    # 单位后缀：摘要渲染「3.23 天/条」，逐字引用须通过（旧实现 rstrip("%") 解析失败 → 误杀）
+    verified, rejected = ev.verify_evidence(
+        {"BTC": [_ev(domain="social_data", field="post_frequency", value="3.23 天/条")]},
+        {},
+        _state(),
+    )
     assert len(verified["BTC"]["bull_case"]) == 1
     assert rejected == {}
+    # 小量级：0.00026684 → 四舍六入到 6 位（0.000267）通过；100 倍单位错误剔除
+    ok = [_ev(domain="market_data", field="funding.value", value="0.000267")]
+    verified, rejected = ev.verify_evidence({"BTC": ok}, {}, _state())
+    assert len(verified["BTC"]["bull_case"]) == 1
+    assert rejected == {}
+    bad = [_ev(domain="market_data", field="funding.value", value="0.03")]
+    verified, rejected = ev.verify_evidence({"BTC": bad}, {}, _state())
+    assert verified["BTC"]["bull_case"] == []
+    assert rejected["BTC"][0]["reason"].startswith("值不一致")
 
 
 def test_verify_percent_suffix_tolerated() -> None:
@@ -263,10 +303,36 @@ def test_verify_list_index_path() -> None:
     verified, rejected = ev.verify_evidence({"BTC": bull}, {}, st)
     assert len(verified["BTC"]["bull_case"]) == 1
     assert rejected == {}
-    bad = [_ev(domain="web_data", field="items[5].title", value="x")]  # 越界
+    bad = [_ev(domain="web_data", field="items[5].title", value="x")]  # 摘要未渲染
     verified, rejected = ev.verify_evidence({"BTC": bad}, {}, st)
     assert verified["BTC"]["bull_case"] == []
+    assert rejected["BTC"][0]["reason"].startswith("引用了摘要未渲染的列表下标")
+    # 下标可见但字段不存在 → 仍走原有「字段不存在」路径
+    missing = [_ev(domain="web_data", field="items[0].author", value="x")]
+    verified, rejected = ev.verify_evidence({"BTC": missing}, {}, st)
     assert rejected["BTC"][0]["reason"].startswith("字段不存在")
+
+
+def test_verify_unrendered_post_index_rejected() -> None:
+    """未渲染推文：数值碰巧对得上也必须剔除（核验按 state 全量解引用）。
+
+    摘要只送最近 10 条推文，state 里有 12 条——不校验下标，LLM 引用一条
+    从未见过的早期推文即可凭空立论（社交明细进摘要的前提条件）。
+    """
+    st = _state()
+    posts = [
+        {"likes": str(10 * (i + 1)), "reposts": "3", "comments": "1", "views": "1", "time": "1d"}
+        for i in range(12)
+    ]
+    st["social_data"] = {"BTC": {"posts": posts}}
+    unseen = [_ev(domain="social_data", field="posts[1].likes", value="20")]
+    verified, rejected = ev.verify_evidence({"BTC": unseen}, {}, st)
+    assert verified["BTC"]["bull_case"] == []
+    assert "摘要未渲染" in rejected["BTC"][0]["reason"]
+    seen = [_ev(domain="social_data", field="posts[11].likes", value="120")]
+    verified, rejected = ev.verify_evidence({"BTC": seen}, {}, st)
+    assert len(verified["BTC"]["bull_case"]) == 1
+    assert rejected == {}
 
 
 def test_verify_wrapped_value_drilldown() -> None:
@@ -294,11 +360,11 @@ def test_verify_scanner_snapshot_domain() -> None:
 
 
 def test_verify_claim_invented_number_rejected() -> None:
-    """claim 含输入中不存在的数值（编造，如 99.99）：剔除留痕（07 票弱检查）。"""
+    """claim 含输入中不存在的数值（编造，如 99.99%）：剔除留痕（07 票弱检查）。"""
     bull = [_ev(claim="7日涨幅达 99.99%，强势")]
     verified, rejected = ev.verify_evidence({"BTC": bull}, {}, _state())
     assert verified["BTC"]["bull_case"] == []
-    assert rejected["BTC"][0]["reason"] == "claim 含输入中不存在的数值: 99.99"
+    assert rejected["BTC"][0]["reason"] == "claim 含输入中不存在的数值: 99.99%"
 
 
 def test_verify_claim_visible_number_passed() -> None:

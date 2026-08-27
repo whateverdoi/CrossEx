@@ -22,9 +22,9 @@ from strategy_research.datasources import (
     defillama,
     mock,
     okx,
+    x_social,
 )
 from strategy_research.datasources import web as web_ds
-from strategy_research.datasources import x_social
 from strategy_research.evidence import EvidenceItem
 from strategy_research.schemas import _extract_json, _match_brace, _try_loads
 
@@ -59,12 +59,21 @@ def _latest(rows: list[dict] | None, key: str) -> float | None:
     return last.get(key)
 
 
-def _mean(rows: list[dict] | None, key: str) -> float | None:
-    """时间序列数值均值（缺失项不计入）。"""
+def _taker_weighted(rows: list[dict] | None) -> float | None:
+    """taker 序列 → 按量加权买卖比 sum(buy_vol)/sum(sell_vol)。
+
+    替代逐点比值的算术均值（等权平均让清淡小时与高成交小时同权，却标称
+    24h 口径）；任一合计缺失/为零 → None（UNKNOWN 纪律）。
+    """
     if not rows:
         return None
-    vals = [r[key] for r in rows if isinstance(r.get(key), (int, float))]
-    return sum(vals) / len(vals) if vals else None
+    buys = [r.get("buy_vol") for r in rows if isinstance(r.get("buy_vol"), (int, float))]
+    sells = [
+        r.get("sell_vol") for r in rows if isinstance(r.get("sell_vol"), (int, float))
+    ]
+    if not buys or not sells or sum(sells) <= 0:
+        return None
+    return round(sum(buys) / sum(sells), 6)
 
 
 def _series_pct_change(rows: list[dict] | None, key: str, hours: int) -> float | None:
@@ -170,6 +179,14 @@ _LIQUIDATION_KEYS = (
     "liq_imbalance",
 )
 
+#: 微观结构核心键（incomplete 判定范围）：不含 OKX 单所爆仓键与 48h 变体——
+#: 这些数据源侧常态缺失，计入会让 incomplete 恒真、失去诊断价值
+_MS_CORE_KEYS = (
+    "oi_change_24h",
+    "ls_ratio_all",
+    "taker_bs_ratio_1h",
+)
+
 
 def _fund_incomplete(fund: dict) -> bool:
     """基本面不完整判定：只看该 kind 应有的字段（结构性缺失不算）。"""
@@ -209,6 +226,8 @@ def _fund(symbol: str, shared: dict) -> dict:
         for key in _FUND_KEYS:
             fund[key] = _dp(tvl_row.get(key) if tvl_row else None, "defillama")
         if fund["kind"] == "protocol":
+            # 板块标签：协议详情自带（无额外请求）；链类无该字段 → 保持 None
+            fund["category"] = (tvl_row or {}).get("category")
             fees = (shared["fees"] or {}).get(slug)
             fund["fees_24h"] = _dp(fees.get("fees_24h") if fees else None, "defillama")
             fund["fees_7d"] = _dp(fees.get("fees_7d") if fees else None, "defillama")
@@ -318,24 +337,48 @@ def _market(symbol: str, shared: dict) -> dict:
     )
     if fapi is None:
         f_err.append("fapi price 缺失")
+
+    # 交易结构（可执行性）：资金费持有成本 + 盘口点差/带内深度
+    interval = sig_mod.funding_interval_hours(funding_rows)
+    mkt["funding_interval_hours"] = _dp(interval, "binance_futures")
+    funding_val = (mkt["funding"] or {}).get("value")
+    for days, key in ((7, "funding_carry_7d_pct"), (30, "funding_carry_30d_pct")):
+        mkt[key] = _dp(
+            sig_mod.funding_carry_pct(funding_val, interval, days), "binance_futures"
+        )
+    book = binance_futures.fetch_order_book(exch)
+    struct = sig_mod.book_structure(book)
+    for snap_key, struct_key in (
+        ("spread_pct", "spread_pct"),
+        ("bid_depth_usd_2pct", "bid_depth_usd"),
+        ("ask_depth_usd_2pct", "ask_depth_usd"),
+    ):
+        mkt[snap_key] = _dp(struct.get(struct_key), "binance_futures")
+    # 深度是下限还是实测：档位不足以覆盖整带时标 band_exhausted（不猜）
+    mkt["depth_band_state"] = _dp(
+        None
+        if struct.get("bid_depth_usd") is None
+        else ("band_exhausted" if struct["depth_band_exhausted"] else "band_complete"),
+        "binance_futures",
+    )
     if f_err:
         mkt["futures_error"] = "; ".join(f_err)
     if errors:
         mkt["error"] = "; ".join(errors)
 
-    # 第一层派生（08 票）：波动率家族 / β·α / 费率横截面 Z（klines 在本函数内算）
+    # 第一层派生（08 票）：波动率家族 / β·α / 费率横截面分位（klines 在本函数内算）
     for key, value in sig_mod.volatility_metrics(klines)["value"].items():
         mkt[key] = _dp(value, "binance_futures")
     for key, value in sig_mod.beta_alpha(klines, shared.get("btc_klines"))["value"].items():
         mkt[key] = _dp(value, "binance_futures")
-    mkt["funding_z"] = _dp(
-        sig_mod.funding_cross_sectional_z(shared.get("funding_rates"), exch),
+    mkt["funding_x_pctile"] = _dp(
+        sig_mod.funding_cross_sectional_pctile(shared.get("funding_rates"), exch),
         "binance_futures",
     )
 
     # taker 买卖比（market 与 microstructure 共用一次拉取）
     taker = binance_futures.fetch_taker_long_short_ratio(exch, "1h", 24)
-    mkt["taker_buy_ratio_24h"] = _dp(_mean(taker, "buy_sell_ratio"), "binance_futures")
+    mkt["taker_buy_ratio_24h"] = _dp(_taker_weighted(taker), "binance_futures")
     # 核心字段判定：衍生品/长窗口缺失由 futures_error/listing_days 承载，不重复标记
     mkt["incomplete"] = any(
         mkt[k]["value"] is None
@@ -347,9 +390,9 @@ def _market(symbol: str, shared: dict) -> dict:
 def _microstructure(
     symbol: str, taker: list[dict] | None, price_ret_24h: float | None
 ) -> dict:
-    """微观结构装配：OI 变化 / 多空比 / taker 比（board PoC 阶段 None）。"""
+    """微观结构装配：OI 变化 / 多空比 / taker 比 / 爆仓。"""
     exch = binance.pair_symbol(symbol)
-    ms: dict[str, Any] = {"board": None, "error": None, "incomplete": False}
+    ms: dict[str, Any] = {"error": None, "incomplete": False}
     # 96 个 1h 点（跨 95h）才能算 48h 变化（48 点仅 47h 跨度，48h 恒缺失）
     oi_hist = binance_futures.fetch_open_interest_hist(exch, "1h", 96)
     if oi_hist is None:
@@ -379,9 +422,10 @@ def _microstructure(
     ms["ls_ratio_top_pos"] = _dp(
         _latest(top_pos, "long_short_ratio"), "binance_futures"
     )
-    ms["taker_bs_ratio"] = _dp(_latest(taker, "buy_sell_ratio"), "binance_futures")
+    ms["taker_bs_ratio_1h"] = _dp(_latest(taker, "buy_sell_ratio"), "binance_futures")
+    # incomplete 只看核心键：OKX 单所爆仓键与 48h 变体常态缺失，计入会使标记恒真
     ms["incomplete"] = any(
-        d["value"] is None for d in ms.values() if isinstance(d, dict)
+        (ms.get(k) or {}).get("value") is None for k in _MS_CORE_KEYS
     )
     return ms
 
@@ -484,22 +528,27 @@ def _error_snapshots(
         "funding_avg_7d",
         "funding_trend",
         "funding_pctile_90d",
+        "funding_interval_hours",
+        "funding_carry_7d_pct",
+        "funding_carry_30d_pct",
         "oi",
         "basis",
+        "spread_pct",
+        "bid_depth_usd_2pct",
+        "ask_depth_usd_2pct",
+        "depth_band_state",
         "taker_buy_ratio_24h",
         "rv_7d",
         "rv_30d",
         "drawdown_1y",
         "vol_adj_ret_7d",
         "vol_adj_ret_30d",
-        "beta_7d",
         "beta_30d",
-        "alpha_7d",
         "alpha_30d",
-        "funding_z",
+        "funding_x_pctile",
     ):
         mkt[key] = _dp(None, "binance_futures")
-    ms: dict[str, Any] = {"board": None, "error": msg, "incomplete": True}
+    ms: dict[str, Any] = {"error": msg, "incomplete": True}
     for key in (
         "oi_change_24h",
         "oi_change_48h",
@@ -508,7 +557,7 @@ def _error_snapshots(
         "ls_ratio_all_change_24h",
         "ls_ratio_top_acc",
         "ls_ratio_top_pos",
-        "taker_bs_ratio",
+        "taker_bs_ratio_1h",
         "oi_price_divergence",
     ):
         ms[key] = _dp(None, "binance_futures")
@@ -528,6 +577,7 @@ def _error_snapshots(
         "posts": [],
         "post_frequency": _dp(None, "x_social"),
         "social_heat_trend": _dp(None, "x_social"),
+        "social_heat_window": _dp(None, "x_social"),
         "social_price_divergence": _dp(None, "x_social"),
     }
     return fund, mkt, ms, web_snap, social_snap
@@ -576,6 +626,7 @@ def _social(symbol: str, mkt: dict) -> dict:
         snap["posts"] = []
         snap["post_frequency"] = _dp(None, "x_social")
         snap["social_heat_trend"] = _dp(None, "x_social")
+        snap["social_heat_window"] = _dp(None, "x_social")
         snap["social_price_divergence"] = _dp(None, "x_social")
         return snap
     posts = raw.get("posts") or []
@@ -587,6 +638,7 @@ def _social(symbol: str, mkt: dict) -> dict:
     snap["post_frequency"] = _dp(x_social.post_frequency_days(posts), "x_social")
     heat = sig_mod.social_heat_trend(posts)
     snap["social_heat_trend"] = _dp(heat, "x_social")
+    snap["social_heat_window"] = _dp(sig_mod.social_heat_window(posts), "x_social")
     snap["social_price_divergence"] = _dp(
         sig_mod.social_price_divergence(
             (mkt.get("change_24h") or {}).get("value"), heat
@@ -770,7 +822,7 @@ def _truncation_probe(exc: Exception) -> dict:
         if comp is not None:
             try:
                 content = comp.choices[0].message.content or ""
-            except Exception:  # noqa: S112 —— 结构异常视为无部分输出
+            except Exception:
                 content = ""
             if content:
                 obj = _extract_json(content)
@@ -813,7 +865,7 @@ def _extract_partial_evidence(exc: Exception) -> list[dict]:
         if comp is not None:
             try:
                 content = comp.choices[0].message.content
-            except Exception:  # noqa: S112 —— 结构异常视为无部分输出
+            except Exception:
                 content = None
             if content:
                 out = _evidence_from_object(_extract_json(content))
@@ -898,12 +950,12 @@ def _branch(state: dict, side: str) -> dict:
 
 
 def bull_research(state: dict) -> dict:
-    """多头证据研究员（02 票）：单 token 结构化证据（≤8 条）。"""
+    """多头证据研究员（02 票）：单 token 结构化证据（数量不设上限，逐条机器核验）。"""
     return _branch(state, "bull")
 
 
 def bear_research(state: dict) -> dict:
-    """空头证据研究员（02 票）：单 token 结构化证据（≤8 条）。"""
+    """空头证据研究员（02 票）：单 token 结构化证据（数量不设上限，逐条机器核验）。"""
     return _branch(state, "bear")
 
 

@@ -122,36 +122,79 @@ _SIGNAL_KEYS = (
     "oi_price_divergence",
     "liq_imbalance",
 )
-#: 第一层派生（08 票）：funding_z 从 market 快照读，其余从 signals.market_metrics.value 读
-_MARKET_METRIC_KEYS = (
-    "funding_z",
+#: market_data 来源键（09 票）：横截面费率分位 + 交易结构（可执行性）；
+#: 原 funding_z（4 主币 z 分）与 beta_7d/alpha_7d（n=7 噪声）退役
+_MARKET_KEYS = (
+    "funding_x_pctile",
+    "funding_interval_hours",
+    "funding_carry_7d_pct",
+    "funding_carry_30d_pct",
+    "spread_pct",
+    "bid_depth_usd_2pct",
+    "ask_depth_usd_2pct",
+    "depth_band_state",
+)
+#: signals.market_metrics.value 来源键（08 票第一层派生，纯数值）
+_METRIC_KEYS = (
     "rv_7d",
     "rv_30d",
     "drawdown_1y",
     "vol_adj_ret_7d",
     "vol_adj_ret_30d",
-    "beta_7d",
     "beta_30d",
-    "alpha_7d",
     "alpha_30d",
     "turnover",
 )
 _TREND_KEYS = ("tvl_trend_30d", "fees_trend_30d", "stablecoin_change_30d")
+#: social_data 来源键：数值档（可参与回看秩相关）+ 档名/分类标签（只进 diff）
+_SOCIAL_KEYS = (
+    "social_heat_trend",
+    "social_heat_window",
+    "post_frequency",
+    "social_price_divergence",
+)
+_SNAPSHOT_KEYS = (
+    *_SIGNAL_KEYS,
+    *_MARKET_KEYS,
+    *_METRIC_KEYS,
+    *_TREND_KEYS,
+    *_SOCIAL_KEYS,
+)
+
+
+def _scalar(value: Any) -> Any:
+    """快照取值：数值/字符串原样，其余（None/dict/list）→ None。
+
+    bool 单独排除——``isinstance(True, int)`` 为真，不过滤会把标记位写成数值。
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    return value
+
+
+def _num_or_none(value: Any) -> float | int | None:
+    """快照取数值：非数值（含 bool/字符串）→ None。"""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return value
 
 
 def _signal_snapshot(symbol: str, state: dict) -> dict:
     """确定性信号快照（04 票）：quadrant/momentum/funding_pctile_90d/
-    oi_price_divergence + 第一层派生（08 票） + 趋势特征（spec D8）。
+    oi_price_divergence + 派生指标与交易结构 + 趋势特征（spec D8）。
 
-    任一缺失 → None（UNKNOWN 纪律）；signals 层失败（error 条目）→ 全 None。
+    任一缺失 → None（UNKNOWN 纪律）；signals 层失败（error 条目）→ signals 派生键
+    全 None，趋势/社交键仍从各自数据域直读（不受信号层牵连）。
     趋势特征值：tvl/fees 为趋势分类（rising/flat/falling），stablecoin 为变化 %。
-    派生键：funding_z 从 market 快照读；rv/beta/alpha/vol_adj/turnover 从
-    signals.market_metrics.value 读（直读数值，快照可校准）。
+    键来源（09 票重组）：``_MARKET_KEYS`` 全部从 market 数据点直读（含字符串档
+    depth_band_state）；``_METRIC_KEYS`` 从 signals.market_metrics.value 直读。
+    原 funding_z（4 主币 z 分）与 beta_7d/alpha_7d（n=7 噪声）退役。
+    社交档（``_SOCIAL_KEYS``）从 social_data 直读，与 signals 是否成功无关：
+    热度趋势/发帖频率取数值（可参与回看秩相关），样本档名与社交/价格背离取
+    字符串标签（复合值只取 label，同 oi_price_divergence），只进 diff 不进相关。
     """
     sig = (state.get("signals") or {}).get(symbol) or {}
-    out: dict[str, Any] = {
-        k: None for k in (*_SIGNAL_KEYS, *_MARKET_METRIC_KEYS, *_TREND_KEYS)
-    }
+    out: dict[str, Any] = {k: None for k in _SNAPSHOT_KEYS}
     if sig and not sig.get("error"):
         mom = (sig.get("momentum") or {}).get("value")
         quad = ((sig.get("divergence") or {}).get("value") or {}).get("quadrant")
@@ -171,15 +214,23 @@ def _signal_snapshot(symbol: str, state: dict) -> dict:
                 "liq_imbalance": imb.get("label") if isinstance(imb, dict) else None,
             }
         )
-        fz = (mkt.get("funding_z") or {}).get("value")
-        out["funding_z"] = fz if isinstance(fz, (int, float)) else None
+        for k in _MARKET_KEYS:
+            out[k] = _scalar((mkt.get(k) or {}).get("value"))
         mm = (sig.get("market_metrics") or {}).get("value") or {}
-        for k in _MARKET_METRIC_KEYS[1:]:  # 其余派生键从 signals.market_metrics 直读
-            v = mm.get(k)
-            out[k] = v if isinstance(v, (int, float)) else None
+        for k in _METRIC_KEYS:
+            out[k] = _num_or_none(mm.get(k))
     fund = (state.get("fundamental_data") or {}).get(symbol) or {}
     for k in _TREND_KEYS:
-        out[k] = (fund.get(k) or {}).get("value")
+        out[k] = _scalar((fund.get(k) or {}).get("value"))
+    soc = (state.get("social_data") or {}).get(symbol) or {}
+    out["social_heat_trend"] = _num_or_none(
+        (soc.get("social_heat_trend") or {}).get("value")
+    )
+    out["post_frequency"] = _num_or_none((soc.get("post_frequency") or {}).get("value"))
+    window = (soc.get("social_heat_window") or {}).get("value")
+    out["social_heat_window"] = _scalar(window)
+    div = (soc.get("social_price_divergence") or {}).get("value")
+    out["social_price_divergence"] = div.get("label") if isinstance(div, dict) else None
     return out
 
 
@@ -226,10 +277,45 @@ def _read_prev_snapshot() -> dict | None:
         return None
 
 
-def _build_signal_diff(prev: dict | None, cur: dict) -> dict:
-    """跨运行信号对比：action = new / changed / unchanged（信号快照语义）。
+#: 信号物性阈值（09 票）：变化超过旧值绝对值的 1% 才算「不同」
+_DIFF_REL_TOL = 0.01
 
-    规则：prev 缺失 → new；信号全字段一致 → unchanged；任一字段变化 → changed。
+#: 近零兜底：|Δ| 小于此值一律视为未变（避免 1e-18 级浮点残差被 1% 阈值放大）
+_DIFF_ABS_FLOOR = 1e-9
+
+
+def _field_changed(prev: Any, cur: Any) -> bool:
+    """单字段物性判定：浮点噪音不算变化，跨零与数据可用性变化算。
+
+    旧实现用 ``prev == cur`` 裸比较，两次相隔 15 分钟的真实运行把 5/5 标的
+    全判为 changed（实测最大相对变化 <0.1%）——stop_long/stop_short 退役后
+    这条链是系统唯一的失效机制，饱和在噪音上等于没有失效机制。
+    规则：任一侧缺失 ↔ 有值 = 数据可用性事件（物性）；数值跨零（符号翻转）
+    = 物性（α 由负转正不是噪音）；其余按相对阈值。
+    """
+    if prev is None or cur is None:
+        return prev != cur
+    numeric = (
+        not isinstance(prev, bool)
+        and not isinstance(cur, bool)
+        and isinstance(prev, (int, float))
+        and isinstance(cur, (int, float))
+    )
+    if not numeric:
+        return prev != cur
+    if prev == cur:
+        return False
+    if prev * cur < 0:
+        return True
+    scale = max(abs(prev), abs(cur))
+    return abs(cur - prev) > max(_DIFF_ABS_FLOOR, _DIFF_REL_TOL * scale)
+
+
+def _build_signal_diff(prev: dict | None, cur: dict) -> dict:
+    """跨运行信号对比：action = new / changed / unchanged + 物性变化字段清单。
+
+    规则：prev 缺失 → new；全部字段物性一致 → unchanged；任一字段越过阈值 →
+    changed，并在 ``changed_fields`` 列出具体键（只说 changed 无法复核）。
     旧 decision 型 stop_short/stop_long 失效语义退役（spec D8）。
     """
     prev_map = (prev or {}).get("signals") or {}
@@ -237,8 +323,18 @@ def _build_signal_diff(prev: dict | None, cur: dict) -> dict:
     diff: dict[str, dict] = {}
     for symbol, cur_sig in cur_map.items():
         p = prev_map.get(symbol)
-        action = "new" if p is None else "unchanged" if p == cur_sig else "changed"
-        diff[symbol] = {"prev": p, "cur": cur_sig, "action": action}
+        if p is None:
+            diff[symbol] = {"prev": None, "cur": cur_sig, "changed_fields": []}
+            diff[symbol]["action"] = "new"
+            continue
+        fields = sorted(set(p) | set(cur_sig))
+        changed = [k for k in fields if _field_changed(p.get(k), cur_sig.get(k))]
+        diff[symbol] = {
+            "prev": p,
+            "cur": cur_sig,
+            "action": "unchanged" if not changed else "changed",
+            "changed_fields": changed,
+        }
     return diff
 
 
@@ -320,17 +416,31 @@ def _evidence_section_lines(
 
 
 def _rejected_lines(rejected: dict, tokens: list[str]) -> list[str]:
-    """剔除记录附录：| token | claim | 原因 |；无剔除空节占位。"""
+    """剔除记录附录：| token | claim | 原因 | 条数 |（按条数降序）。
+
+    09 票聚合：实测一次运行 172 条剔除里 168 条是同一句 claim 撞同一条原因
+    （来自一个被 max_tokens 截断后恢复了 95 条的分支），逐条罗列把报告里最
+    有诊断价值的章节埋成噪音。按 (token, 原因, 归一化 claim) 计数后，同一
+    失败模式一眼可见，重复次数本身成了严重度信号。
+    """
     lines = ["## 剔除记录", ""]
-    rows = [(s, r) for s in tokens for r in (rejected.get(s) or [])]
-    if not rows:
+    counts: dict[tuple[str, str, str], int] = {}
+    for s in tokens:
+        for r in rejected.get(s) or []:
+            key = (s, r.get("reason", ""), "".join((r.get("claim") or "").split()))
+            counts[key] = counts.get(key, 0) + 1
+    if not counts:
         lines.append("（本批无剔除记录）")
         lines.append("")
         return lines
-    lines.append("| token | claim | 原因 |")
-    lines.append("|---|---|---|")
-    for s, r in rows:
-        lines.append(f"| {s} | {r.get('claim', '')} | {r.get('reason', '')} |")
+    rows = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0][0], kv[0][1]))
+    total = sum(counts.values())
+    lines.append(f"共 {total} 条剔除，聚合为 {len(counts)} 种（条数=同一失败模式重复次数）。")
+    lines.append("")
+    lines.append("| token | claim | 原因 | 条数 |")
+    lines.append("|---|---|---|---|")
+    for (s, reason, claim), n in rows:
+        lines.append(f"| {s} | {claim} | {reason} | {n} |")
     lines.append("")
     return lines
 
@@ -363,8 +473,8 @@ def _render_evidence_md(state: dict, run: dict) -> str:
         "",
         "## 总览",
         "",
-        "| token | 最新价格 | 多头证据数 | 空头证据数 | 数据域覆盖 |",
-        "|---|---|---|---|---|",
+        "| token | 最新价格 | 做多通过 | 做空通过 | 剔除 | 数据域覆盖 |",
+        "|---|---|---|---|---|---|",
     ]
     for s in state["tokens"]:
         ev = evidence.get(s) or {}
@@ -373,8 +483,17 @@ def _render_evidence_md(state: dict, run: dict) -> str:
         domains = ", ".join(_domains(bull + bear)) or "—"
         price = ((state.get("market_data") or {}).get(s) or {}).get("price") or {}
         lines.append(
-            f"| {s} | {_price_text(price.get('value'))} | {len(bull)} | {len(bear)} | {domains} |"
+            f"| {s} | {_price_text(price.get('value'))} | {len(bull)} | {len(bear)} "
+            f"| {len(rejected.get(s) or [])} | {domains} |"
         )
+    lines += [
+        "",
+        (
+            "> 做多/做空两列是两条分支各自的**通过核验条数**，不是方向强度：两分支"
+            "被对称地要求「有多少写多少」，条数差只反映该标的哪一侧可引用事实更多，"
+            "不构成多空结论。剔除列反映该标的证据的可信度损耗。"
+        ),
+    ]
     lines.append("")
     for s in state["tokens"]:
         lines += _evidence_section_lines(

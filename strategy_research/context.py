@@ -13,17 +13,103 @@ from __future__ import annotations
 
 from typing import Any
 
-# ── 情绪解读规则注记（单一来源）────────────────────────
+# ── 字段口径注记（单一来源：快照侧 SENTIMENT_NOTE + LLM 侧摘要行）────
 
-#: sentiment 解读规则锚点（与分支 prompt 一致）
-SENTIMENT_NOTE = (
-    "持仓指标原始直读；解读规则：funding 高=拥挤反向，多空比高=偏多；"
-    "funding_pctile_90d 高分位=费率极端拥挤；funding_z 高=费率相对主流更拥挤（多拥挤），"
-    "funding_z 低=费率相对主流更低（空拥挤）；oi_price_divergence 同向=趋势确认，背离=弱势；"
-    "爆仓失衡比高=多头爆仓主导（下行压力），低=空头爆仓主导（回补反弹压力）；"
-    "爆仓额/OI 比高=强平风险集中；social_heat_trend 高=社区热度上升，低=退潮；"
-    "social_price_divergence 同向=趋势确认，背离=缺社区支撑"
+#: 口径注记表：每条 = 摘要中一行的正文（渲染时冠以「口径」前缀）。
+#:
+#: 09 票修复：本表此前只以 ``SENTIMENT_NOTE`` 形式落进
+#: ``state.signals[s].sentiment.note``，而 ``_signal_lines`` 只渲染
+#: ``sentiment.components`` —— 分支 LLM 从未见过任何解读规则，
+#: 「费率为正=多头收到资金费」「funding 分位高=偏多」这类方向反写的
+#: claim 因此畅通无阻（核验只管数据出处，不管语义一致性）。现在本表
+#: 逐行随摘要送达 LLM，与快照注记同源拼接，不会两头漂移。
+#:
+#: 纪律：注记正文不引入渲染字段名之外的新数值——摘要是核验
+#: ``_claim_unknown_numbers`` 的合法数值源，注记里凭空出现的数字会变成放行
+#: 编造值的后门（提及「近 7 天」这类窗口是因为键名本身已带该数字）。
+_FIELD_NOTES: tuple[str, ...] = (
+    (
+        "funding 高=拥挤反向：funding 为本期资金费率原始小数，正值=多头支付给空头"
+        "（多头付费=多头拥挤），负值=空头支付给多头；对多头而言费率是持仓成本不是收益"
+    ),
+    "funding_avg_7d / funding_trend：近 7 天费率均值与趋势档，rising=拥挤加剧",
+    (
+        "funding_pctile_90d：费率绝对值在该币自身近 90 天分布中的分位，"
+        "高=处于自身历史极端（只表极端，不表方向）"
+    ),
+    (
+        "funding_x_pctile：费率在全市场合约横截面中的分位，高=多头付费远高于全市场"
+        "（多头拥挤，反向看空），低=空头付费主导（空头拥挤，反向看多）"
+    ),
+    (
+        "funding_interval_hours / funding_carry_7d_pct / funding_carry_30d_pct："
+        "结算间隔小时数（各合约不同，并非一律同周期）与按当前费率持有若干天的资金费"
+        "成本 %——carry 与涨跌幅同尺度可直接比较，正=多头付出"
+    ),
+    (
+        "divergence_7d / divergence_30d：基本面增速 减 价格涨幅（正=基本面跑赢价格）"
+        "，不是价格相对均线的乖离"
+    ),
+    "momentum：TVL 变化加权得到的基本面动量分，不含价格维度",
+    (
+        "ls_ratio_all / ls_ratio_top_acc / ls_ratio_top_pos：多头除以空头的比值"
+        "（依次按全体账户数、顶级账户数、顶级账户持仓量），大于 1 仅表示多头更多，"
+        "本身不含方向对错"
+    ),
+    (
+        "taker_bs_ratio_1h 与 taker_buy_ratio_24h 是两个不同窗口：前者为最近一个整小时"
+        "的主动买量/主动卖量，后者为近 24 小时按量加权的同一比值；两者数值可以不同且"
+        "都正确，禁止据其差异立论"
+    ),
+    (
+        "liq_long_24h / liq_short_24h / liq_total_24h：单一交易所口径的强平名义额，"
+        "不代表全市场；liq_total_oi_ratio 的分子来自该所、分母来自另一所的 OI，"
+        "属跨所比值，只作量级参照、不是同口径占用率；liq_imbalance.value.ratio = "
+        "多头爆仓额 / 空头爆仓额（>1 为多头被强平更多，下行压力），label 只是该比值"
+        "的档位"
+    ),
+    "spread_pct：盘口最优买卖价差占中价的比例 %，即市价单立即付出的成本，越薄越好",
+    (
+        "bid_depth_usd_2pct / ask_depth_usd_2pct：中价两侧同幅百分比带内可成交的名义额"
+        "（USDT），决定仓位能不能上量；depth_band_state 为 band_exhausted 时该值只是"
+        "下限（档位已被带宽截断），band_complete 才是实测"
+    ),
+    (
+        "beta_30d / alpha_30d：相对 BTC 的日收益回归系数与日超额收益（正=跑赢 BTC）；"
+        "短窗口估出的 β 是噪声，故系统不提供短窗口版本"
+    ),
+    (
+        "rv_7d / rv_30d：年化已实现波动率 %；vol_adj_ret_7d / vol_adj_ret_30d："
+        "区间收益折算成该区间波动的 σ 倍数，跨资产可比；drawdown_1y：最新价距一年"
+        "最高收盘的回撤 %（非正，零=创新高）"
+    ),
+    (
+        "turnover：成交额占流通市值的日内换手比例；basis：合约价相对现货价的溢价 %："
+        "正=合约升水"
+    ),
+    (
+        "social_heat_trend：近期推文互动强度相对更早推文中位数的变化 %，高=热度上升；"
+        "social_heat_window.value 为本次读数实际用的样本档（档名即算式，两档不可跨比）；"
+        "post_frequency.value 为每条推文平均间隔天数，越小越活跃"
+    ),
+    (
+        "posts[i]：单条推文的页面原样文本（如 120 / 1.2万，非归一化数值），i 为摘要中"
+        "标注的原序列下标（时间升序，末条最新）；互动强度 = likes + reposts + "
+        "comments，views 是触达人数不是互动，禁止计入强度"
+    ),
+    (
+        "tvl_trend_30d / fees_trend_30d：近 30 天历史序列的确定性趋势档"
+        "（rising / flat / falling）；stablecoin_change_30d：近 30 天稳定币供应变化 %，"
+        "正=供应扩张"
+    ),
+    (
+        "scanner_snapshot 各字段：截至节标题标注日期的静态历史窗口，禁止与实时字段"
+        "当作同一时点并置比较"
+    ),
 )
+
+#: sentiment 解读规则锚点（快照侧留痕）：与摘要口径注记同源拼接，不再两处维护
+SENTIMENT_NOTE = "持仓指标原始直读；" + "；".join(_FIELD_NOTES)
 
 
 # ── Prompt（分支证据 prompt，spec 四：BULL/BEAR）─────────────────
@@ -41,7 +127,8 @@ _BRANCH_RULES = (
     "binance_futures / defillama / bing / x_social 等）或节标题（市场/基本面/新闻/社交）作为 domain。\n"
     "4. basis.field 必须引用到输入中的标量层（含 .value 后缀），如 momentum.value、"
     "divergence.value.quadrant、sentiment.components.funding、tvl.value、"
-    "oi_change_24h.value；社交节推文序列为裸字段（posts[0].likes，无 .value 后缀）；"
+    "oi_change_24h.value；社交节推文序列为裸字段（posts[i].likes，无 .value 后缀，"
+    "i 只能取摘要中实际出现过的下标，禁止引用未渲染的更早推文）；"
     "扫描器快照节字段自带完整路径（如 market.{SYMBOL}.price）。\n"
     "5. basis.value 必须逐字引用输入中该字段的显示值，禁止改写、重算或四舍五入。\n"
     "6. 只提取"
@@ -81,6 +168,10 @@ BEAR_PROMPT = (
 
 
 # ── 摘要构建器（分支摘要，从 nodes 收敛至此）────────────────
+
+
+#: 摘要里渲染的单条推文上限（原始序列不截断，只取最近的若干条送 LLM）
+_POST_RENDER_CAP = 10
 
 
 def _dp_text(dp: dict | None, decimals: int = 2) -> str:
@@ -180,7 +271,9 @@ def _facts_summary_lines(symbol: str, state: dict) -> list[str]:
     """确定性快照 → LLM 摘要骨架（分支摘要共用）。
 
     只喂数字 + 变化率 + source 标签（含微观结构节）；缺失一律 UNKNOWN；
-    新闻 ≤3 条；总行数 ≤50（约 1200 token/token，规格 分支节-1）。
+    新闻 ≤3 条、推文明细 ≤10 条（``_POST_RENDER_CAP``）；mock 全字段摘要实测
+    约 126 行 / 6k 字符，其中推文明细占 11 行——行数唯一的可变部分是推文条数
+    （未登录抓取只有 5-7 条）。
     """
     fund = (state.get("fundamental_data") or {}).get(symbol) or {}
     mkt = (state.get("market_data") or {}).get(symbol) or {}
@@ -189,7 +282,12 @@ def _facts_summary_lines(symbol: str, state: dict) -> list[str]:
     lines = [f"研究标的: {symbol}", "", "== 基本面（fundamental_data）=="]
     kind = fund.get("kind") or "unknown"
     name = fund.get("name")
-    lines.append(f"kind: {kind}" + (f" ({name})" if name else ""))
+    category = fund.get("category")
+    lines.append(
+        f"kind: {kind}"
+        + (f" ({name})" if name else "")
+        + (f" category: {category}" if category else "")
+    )
     for key in (
         "tvl",
         "tvl_change_1d",
@@ -202,9 +300,16 @@ def _facts_summary_lines(symbol: str, state: dict) -> list[str]:
     if kind == "protocol":
         for key in ("fees_24h", "fees_7d", "revenue_24h", "revenue_7d"):
             lines.append(f"{key}: {_dp_text(fund.get(key))}")
+        lines.append(
+            f"tvl_trend_30d: {_dp_text(fund.get('tvl_trend_30d'))}"
+            f" fees_trend_30d: {_dp_text(fund.get('fees_trend_30d'))}"
+        )
     else:
         for key in ("stablecoin_supply", "dex_volume_24h"):
             lines.append(f"{key}: {_dp_text(fund.get(key))}")
+        lines.append(
+            f"stablecoin_change_30d: {_dp_text(fund.get('stablecoin_change_30d'))}"
+        )
     lines += ["", "== 市场（market_data）=="]
     for key in ("price", "quote_volume_24h"):
         lines.append(f"{key}: {_dp_text(mkt.get(key))}")
@@ -214,11 +319,25 @@ def _facts_summary_lines(symbol: str, state: dict) -> list[str]:
         f"funding: {_dp_text(mkt.get('funding'), 6)}"
         f" funding_avg_7d: {_dp_text(mkt.get('funding_avg_7d'), 6)}"
         f" funding_trend: {_dp_text(mkt.get('funding_trend'))}"
+        f" funding_pctile_90d: {_dp_text(mkt.get('funding_pctile_90d'), 1)}"
+        f" funding_x_pctile: {_dp_text(mkt.get('funding_x_pctile'), 1)}"
+    )
+    lines.append(
+        f"funding_interval_hours: {_dp_text(mkt.get('funding_interval_hours'))}"
+        f" funding_carry_7d_pct: {_dp_text(mkt.get('funding_carry_7d_pct'))}"
+        f" funding_carry_30d_pct: {_dp_text(mkt.get('funding_carry_30d_pct'))}"
     )
     lines.append(f"oi: {_dp_text(mkt.get('oi'))} basis: {_pct_text(mkt.get('basis'))}")
     lines.append(
         f"taker_buy_ratio_24h: {_dp_text(mkt.get('taker_buy_ratio_24h'))}"
         f" listing_days: {_dp_text(mkt.get('listing_days'))}"
+    )
+    lines += ["", "== 交易结构（market_data，可执行性：能不能成交、代价多少）=="]
+    lines.append(
+        f"spread_pct: {_dp_text(mkt.get('spread_pct'), 4)}"
+        f" bid_depth_usd_2pct: {_dp_text(mkt.get('bid_depth_usd_2pct'))}"
+        f" ask_depth_usd_2pct: {_dp_text(mkt.get('ask_depth_usd_2pct'))}"
+        f" depth_band_state: {_dp_text(mkt.get('depth_band_state'))}"
     )
     lines += ["", "== 微观结构（microstructure_data）=="]
     for key in (
@@ -229,7 +348,7 @@ def _facts_summary_lines(symbol: str, state: dict) -> list[str]:
         "ls_ratio_all_change_24h",
         "ls_ratio_top_acc",
         "ls_ratio_top_pos",
-        "taker_bs_ratio",
+        "taker_bs_ratio_1h",
         "liq_long_24h",
         "liq_short_24h",
         "liq_total_24h",
@@ -238,8 +357,13 @@ def _facts_summary_lines(symbol: str, state: dict) -> list[str]:
         lines.append(f"{key}: {_dp_text(ms.get(key))}")
     imb = (ms.get("liq_imbalance") or {}).get("value") or {}
     lines.append(
-        f"liq_imbalance: {imb.get('label') or 'UNKNOWN'}"
-        + (f"（{imb['note']}）" if imb.get("note") else "")
+        f"liq_imbalance.value.label: {imb.get('label') or 'UNKNOWN'}"
+        + (
+            f"  liq_imbalance.value.ratio: {imb['ratio']:.2f}"
+            if isinstance(imb.get("ratio"), (int, float))
+            else "  liq_imbalance.value.ratio: UNKNOWN"
+        )
+        + (f"  liq_imbalance.value.note: {imb['note']}" if imb.get("note") else "")
     )
     snap = state.get("scanner_snapshot") or {}
     base = _snap_key(symbol)  # 快照 key 为裸符号，消费点对齐命名空间
@@ -310,14 +434,47 @@ def _facts_summary_lines(symbol: str, state: dict) -> list[str]:
             else "  post_frequency: UNKNOWN"
         )
     )
-    # 整体趋势指标（确定性派生，非单条推文明细）：热度趋势 + 社交/价格背离
+    # 整体趋势指标（确定性派生）：热度趋势 + 样本档 + 社交/价格背离
     heat = (soc.get("social_heat_trend") or {}).get("value")
-    lines.append(f"social_heat_trend.value: {heat if heat is not None else 'UNKNOWN'}")
+    window = (soc.get("social_heat_window") or {}).get("value")
+    lines.append(
+        f"social_heat_trend.value: {heat if heat is not None else 'UNKNOWN'}"
+        f"  social_heat_window.value: {window or 'UNKNOWN（样本不足，未派生）'}"
+    )
     div = (soc.get("social_price_divergence") or {}).get("value") or {}
     lines.append(f"social_price_divergence.value.label: {div.get('label') or 'UNKNOWN'}")
     if div.get("note"):
         lines.append(f"social_price_divergence.value.note: {div.get('note')}")
+    # 单条推文明细：整体趋势只有 1 个读数，明细才是趋势/脉冲的可复核来源
+    posts = soc.get("posts") or []
+    if posts:
+        shown = posts[-_POST_RENDER_CAP:]
+        lines.append(
+            f"posts（共 {len(posts)} 条，时间升序末条最新；下为最近 {len(shown)} 条，"
+            "下标沿用原序列，basis 只能引用下方出现过的下标）"
+        )
+        for off, p in enumerate(shown):
+            i = len(posts) - len(shown) + off
+            lines.append(
+                " ".join(
+                    f"posts[{i}].{k}: {p.get(k) if p.get(k) is not None else 'UNKNOWN'}"
+                    for k in ("likes", "reposts", "comments", "views", "time")
+                )
+            )
+    else:
+        lines.append("posts: UNKNOWN")
     return lines
+
+
+def _field_note_lines() -> list[str]:
+    """口径注记块（09 票）：解读规则必须随数据一起送达 LLM 才可能被遵守。
+
+    放在数据之前（首因位置），且与快照侧 ``SENTIMENT_NOTE`` 同源。
+    """
+    return [
+        "== 字段口径（claim 中的方向表述必须与此一致，冲突即为错误）==",
+        *[f"口径 {note}" for note in _FIELD_NOTES],
+    ]
 
 
 def build_branch_summary(symbol: str, state: dict) -> str:
@@ -328,6 +485,9 @@ def build_branch_summary(symbol: str, state: dict) -> str:
     return "\n".join(
         [
             *_market_env_lines(state),
+            "",
+            *_field_note_lines(),
+            "",
             *_facts_summary_lines(symbol, state),
             "",
             "只提取证据，禁止结论。",

@@ -1,7 +1,7 @@
-"""全局状态：15 字段 TypedDict（规格二节数据字典）。
+"""全局状态：16 字段 TypedDict（规格二节数据字典）。
 
 后写覆盖语义：每字段每 symbol 恰好写一次，无 reducer；
-字段来源 = 数据流（① 写四快照 / ② 写 signals / 分支写证据 / ④ 写工件）。
+字段来源 = 数据流（① 写五快照 + scanner_snapshot / ② 写 signals / 分支写证据 / ④ 写工件）。
 """
 
 from __future__ import annotations

@@ -40,6 +40,7 @@ def _state_with(symbol="BTC"):
                 "fees_7d": _dp(700_000),
                 "revenue_24h": _dp(50_000),
                 "revenue_7d": _dp(350_000),
+                "category": "DEX",  # 板块标签（DeFiLlama 协议详情自带，09 票）
             }
         },
         "market_data": {
@@ -129,19 +130,31 @@ class TestBranchSummaryContract:
         summary = context.build_branch_summary("BTC", _state_with())
         assert field in summary, f"分支 prompt 引用 {field}，但摘要未渲染"
 
-    def test_social_section_renders_aggregate_only(self):
-        """社交节只渲染确定性整体指标（粉丝数/发帖频率/热度趋势/背离），
-        不渲染单条推文 posts[i] 明细——LLM 只能引用整体趋势（compute_signals 产物）。"""
+    def test_social_section_renders_post_detail(self):
+        """社交节 = 整体指标 + 样本档 + 单条推文明细（最近 10 条，下标沿用原序列）。
+
+        旧契约「只渲染整体指标」已作废：prompt 第 4 条一直要求引用
+        ``posts[i].likes``，而渲染器从不输出该字段——一条永远不可能被满足的死
+        规则，同时核验按 state 全量解引用，编造的下标照样能对上数值。
+        """
         state = _state_with()
+        posts = [
+            {
+                "likes": str(10 * (i + 1)),
+                "reposts": "3",
+                "comments": "1",
+                "views": "5200",
+                "time": f"{12 - i}h",
+            }
+            for i in range(12)
+        ]
         state["social_data"] = {
             "BTC": {
                 "follower_count": _dp("16.6万"),
-                "posts": [
-                    {"likes": "120", "reposts": "30", "comments": "18", "views": "5200", "time": "2h"},
-                    {"likes": "40", "reposts": "8", "comments": "5", "views": "2100", "time": "1d"},
-                ],
+                "posts": posts,
                 "post_frequency": _dp(0.5),
                 "social_heat_trend": _dp(217.0),
+                "social_heat_window": _dp("recent5_vs_prior_median"),
                 "social_price_divergence": _dp(
                     {"label": "confirm_long", "note": "价涨社区热度升：趋势确认"}
                 ),
@@ -152,9 +165,61 @@ class TestBranchSummaryContract:
         assert "follower_count.value: 16.6万" in summary
         assert "post_frequency.value: 0.5 天/条" in summary
         assert "social_heat_trend.value: 217.0" in summary
+        assert "social_heat_window.value: recent5_vs_prior_median" in summary
         assert "social_price_divergence.value.label: confirm_long" in summary
         assert "social_price_divergence.value.note: 价涨社区热度升：趋势确认" in summary
-        assert "posts[" not in summary  # 单条推文明细不渲染（用户契约：整体趋势）
+        # 明细送达：12 条只渲染最近 10 条，且下标 = 原序列下标（2..11）
+        assert "posts[2].likes: 30" in summary
+        assert "posts[11].likes: 120" in summary
+        assert "posts[1].likes" not in summary  # 超出最近 10 条上限的下标不渲染
+        assert "posts[11].time: 1h" in summary
+        assert "下为最近 10 条" in summary  # 明示截断口径，LLM 才知道自己看到的不是全部
+
+    def test_social_section_missing_posts(self):
+        """抓取失败（posts 空 + 派生值 None）→ 整体指标与明细一律 UNKNOWN。"""
+        state = _state_with()
+        state["social_data"] = {
+            "BTC": {
+                "follower_count": _dp(None),
+                "posts": [],
+                "post_frequency": _dp(None),
+                "social_heat_trend": _dp(None),
+                "social_heat_window": _dp(None),
+                "social_price_divergence": _dp(None),
+            }
+        }
+        summary = context.build_branch_summary("BTC", state)
+        assert "social_heat_trend.value: UNKNOWN" in summary
+        assert "social_heat_window.value: UNKNOWN" in summary
+        assert "post_frequency: UNKNOWN" in summary
+        assert "posts: UNKNOWN" in summary
+
+    def test_fundamental_trend_features_render(self):
+        """趋势特征送达：三键早已进快照 _TREND_KEYS 却从不进摘要（抓了不喂）。"""
+        summary = context.build_branch_summary("BTC", _state_with())
+        assert "tvl_trend_30d: UNKNOWN" in summary  # 本 fixture 未给值
+        state = _state_with()
+        state["fundamental_data"]["BTC"]["tvl_trend_30d"] = _dp("rising")
+        state["fundamental_data"]["BTC"]["fees_trend_30d"] = _dp("falling")
+        proto = context.build_branch_summary("BTC", state)
+        assert "tvl_trend_30d: rising fees_trend_30d: falling" in proto
+        # chain 类：结构性缺 tvl/fees 趋势，改渲 stablecoin 变化
+        chain = _state_with()
+        chain["fundamental_data"]["BTC"]["kind"] = "chain"
+        chain["fundamental_data"]["BTC"]["stablecoin_change_30d"] = _dp(4.2)
+        assert "stablecoin_change_30d: 4.20" in context.build_branch_summary(
+            "BTC", chain
+        )
+
+    def test_fundamental_category_renders_for_audience(self):
+        """板块进摘要：LLM 与人工都能看出「这几条证据同属一个板块」；缺失则不留空标签。"""
+        summary = context.build_branch_summary("BTC", _state_with())
+        assert "kind: protocol (Mock) category: DEX" in summary
+        state = _state_with()
+        del state["fundamental_data"]["BTC"]["category"]
+        basic = context.build_branch_summary("BTC", state).split("== 市场（market_data）==")[0]
+        assert "kind: protocol (Mock)\n" in basic  # 行为仍渲染
+        assert "category" not in basic  # 无板块 ≠ 空板块，不伪造标签
 
     def test_branch_summary_is_deterministic_snapshot(self):
         """分支摘要 = 纯确定性快照：信号节 + 指令行，无任何决策链产物。"""

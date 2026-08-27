@@ -1,19 +1,22 @@
 """03 票 RED：screener 确定性筛选 + main 模式互斥。
 
 验收映射：次新过滤 / 波动榜排序 / 稳定币排除 / 快照失败抛 ScreeningError /
-rank 空注册表不抛异常 / mock 固定 6 候选 / 手动模式 meta.screening.mode。
+rank 空注册表不抛异常 / mock 固定 6 候选 / 手动模式 meta.screening.mode /
+板块上限让位与索引失败降级。
 """
 
 from __future__ import annotations
 
 import pytest
 
-from strategy_research.datasources import binance_futures
+from strategy_research.datasources import binance_futures, defillama
 from strategy_research.main import _resolve_tokens, main, parse_args
 from strategy_research.screener import (
+    DEFAULT_MAX_PER_CATEGORY,
     DEFAULT_RULES,
     ScreeningError,
     ScreenRule,
+    _diversify,
     select_tokens,
 )
 
@@ -195,11 +198,17 @@ def _fake_listing() -> dict[str, int]:
     }
 
 
+def _fake_categories() -> dict[str, str]:
+    """板块索引（fetch_protocol_categories 同构）：BTC/SOL 同属 L1，其余各一块。"""
+    return {"BTC": "L1", "SOL": "L1", "NEW": "Derivatives", "OLD": "RWA"}
+
+
 def _patch_fetch(monkeypatch) -> None:
     monkeypatch.setenv("SR_MOCK", "0")
     monkeypatch.setattr(binance_futures, "fetch_fapi_ticker_24h_all", _fake_tickers)
     monkeypatch.setattr(binance_futures, "fetch_exchange_info", _fake_exchange_info)
     monkeypatch.setattr(binance_futures, "fetch_listing_days", _fake_listing)
+    monkeypatch.setattr(defillama, "fetch_protocol_categories", _fake_categories)
 
 
 def test_select_tokens_auto_filters_ranks_and_annotates(monkeypatch):
@@ -294,6 +303,132 @@ def test_select_tokens_invalid_rules(monkeypatch):
         )
 
 
+# ── 板块多样性约束（09 票）─────────────────────────────────
+
+
+def _crow(symbol: str, category: str | None = None) -> dict:
+    """_diversify 输入行：symbol + 可选 category（不碰文件头部的 _row 指标构造器）。"""
+    row = {"symbol": symbol}
+    if category is not None:
+        row["category"] = category
+    return row
+
+
+def test_diversify_cap_binds_and_unknown_spared():
+    """同板块超额让位给榜后段；category 缺失各占一桶（UNKNOWN 不当惩罚）。"""
+    rows = [
+        _crow("A", "L1"),
+        _crow("B", "L1"),
+        _crow("C", "L1"),
+        _crow("D", "DEX"),
+        _crow("E"),
+        _crow("F"),
+    ]
+    picked, skipped = _diversify(rows, top_n=4, cap=2)
+    # A/B 占满 L1 → C 让位 → D 补位 → E 为榜后段第 4 位
+    assert [r["symbol"] for r in picked] == ["A", "B", "D", "E"]
+    assert skipped == 1
+
+    # 候选不足 Top N：全进不抛；cap 大于桶容量时等价于无约束
+    picked, skipped = _diversify(rows, top_n=10, cap=99)
+    assert [r["symbol"] for r in picked] == ["A", "B", "C", "D", "E", "F"]
+    assert skipped == 0
+
+
+def _patch_sector_pool(monkeypatch, vols: dict[str, float], categories: dict[str, str]):
+    """注入同板块超额的候选池（成交额榜）+ 板块索引。"""
+    monkeypatch.setenv("SR_MOCK", "0")
+    monkeypatch.setattr(
+        binance_futures,
+        "fetch_fapi_ticker_24h_all",
+        lambda: {
+            s: {"price": 1.0, "price_change_pct": 1.0, "quote_volume": v}
+            for s, v in vols.items()
+        },
+    )
+    monkeypatch.setattr(
+        binance_futures,
+        "fetch_exchange_info",
+        lambda: {
+            "symbols": [
+                {
+                    "symbol": s,
+                    "status": "TRADING",
+                    "contractType": "PERPETUAL",
+                    "baseAsset": s.removesuffix("USDT"),
+                }
+                for s in vols
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        binance_futures, "fetch_listing_days", lambda: {s: 10 for s in vols}
+    )
+    monkeypatch.setattr(defillama, "fetch_protocol_categories", lambda: dict(categories))
+
+
+def test_select_tokens_sector_cap_defers_and_annotates(monkeypatch):
+    """约束生效：同板块超额者让位给榜后段，让位数与板块均写进 rules/reason。"""
+    _patch_sector_pool(
+        monkeypatch,
+        {"AUSDT": 5e8, "BUSDT": 4e8, "CUSDT": 3e8, "DUSDT": 2e8, "EUSDT": 1e8},
+        {"A": "L1", "B": "L1", "C": "L1", "D": "DEX"},  # E 无分类
+    )
+    result = select_tokens(
+        [ScreenRule("rank", "quote_volume")], top_n=4, max_per_category=2
+    )
+    assert [c["symbol"] for c in result.candidates] == [
+        "AUSDT",
+        "BUSDT",
+        "DUSDT",
+        "EUSDT",
+    ]
+    assert result.rules[-1] == "sector_cap(max_per_category=2)：1 个同板块超额候选让位"
+    assert "板块=L1" in result.candidates[0]["reason"]
+    assert result.candidates[0]["category"] == "L1"
+    # 无分类候选保留（UNKNOWN 不惩罚），但板块字段为 None、reason 不留假标签
+    assert result.candidates[3]["category"] is None
+    assert "板块=" not in result.candidates[3]["reason"]
+
+
+def test_select_tokens_cap_off_skips_index_request(monkeypatch):
+    """max_per_category=0：约束关闭 ⇒ 不碰 6.7MB 板块索引（省一次全量请求）。"""
+    _patch_sector_pool(monkeypatch, {"AUSDT": 5e8, "BUSDT": 4e8}, {"A": "L1", "B": "L1"})
+
+    def _fail(*args, **kwargs):
+        raise AssertionError("约束关闭时不应拉取板块索引")
+
+    monkeypatch.setattr(defillama, "fetch_protocol_categories", _fail)
+    result = select_tokens(
+        [ScreenRule("rank", "quote_volume")], top_n=2, max_per_category=0
+    )
+    assert [c["symbol"] for c in result.candidates] == ["AUSDT", "BUSDT"]
+    assert result.rules == ["quote_volume()"]
+
+
+def test_select_tokens_index_unavailable_degrades_without_abort(monkeypatch):
+    """板块索引是辅助数据：失败/空响应只让约束不生效并留痕，不终止批。"""
+    _patch_sector_pool(monkeypatch, {"AUSDT": 5e8, "BUSDT": 4e8}, {"A": "L1", "B": "L1"})
+    monkeypatch.setattr(defillama, "fetch_protocol_categories", lambda: None)
+    result = select_tokens(
+        [ScreenRule("rank", "quote_volume")], top_n=2, max_per_category=1
+    )
+    # 未生效 = 退化为纯榜截断（同板块 2 币照进），而不是丢一个位置
+    assert [c["symbol"] for c in result.candidates] == ["AUSDT", "BUSDT"]
+    assert result.rules[-1] == "sector_cap(max_per_category=1) 未生效：板块索引不可用"
+    assert all(c["category"] is None for c in result.candidates)
+
+    monkeypatch.setattr(defillama, "fetch_protocol_categories", dict)
+    result = select_tokens(
+        [ScreenRule("rank", "quote_volume")], top_n=2, max_per_category=1
+    )
+    assert "未生效" in result.rules[-1]
+
+
+def test_default_max_per_category_is_three():
+    assert DEFAULT_MAX_PER_CATEGORY == 3
+
+
 # ── mock 模式 ──────────────────────────────────────────────
 
 
@@ -317,6 +452,9 @@ def test_select_tokens_mock_mode_fixed_candidates_no_io(monkeypatch):
         "XRP",
     ]
     assert all(c["reason"] == "mock 固定候选" for c in result.candidates)
+    # mock/live 字段同构（规格纪律 6）：候选含 category 键
+    assert all("category" in c for c in result.candidates)
+    assert result.candidates[0]["category"] == "Chain"
 
 
 # ── main 模式互斥 ──────────────────────────────────────────

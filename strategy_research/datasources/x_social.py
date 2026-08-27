@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import contextlib
 import json
 import re
 import time
@@ -98,7 +99,8 @@ def _rel_ago(rel: str | None) -> float:
         n, unit = int(m.group(1)), m.group(2)
         mult = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800, "y": 31536000}[unit]
         return n * mult
-    now = datetime.now()
+    # 页面月日按查看者本地时区渲染，比较基准同为本地墙钟（取 aware 只为口径显式）
+    now = datetime.now().astimezone()
     m = re.match(r"([a-z]{3})\s+(\d{1,2})", s)
     if m and m.group(1) in _MONTHS:
         month, day = _MONTHS[m.group(1)], int(m.group(2))
@@ -107,10 +109,11 @@ def _rel_ago(rel: str | None) -> float:
         if not m:
             return float("inf")
         month, day = int(m.group(1)), int(m.group(2))
-    ts = datetime(now.year, month, day).timestamp()
-    if ts > now.timestamp():  # 未来（跨年）→ 去年
-        ts = datetime(now.year - 1, month, day).timestamp()
-    return max(0.0, now.timestamp() - ts)
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    ts = today.replace(year=now.year, month=month, day=day)
+    if ts > today:  # 未来（跨年）→ 去年
+        ts = ts.replace(year=now.year - 1)
+    return max(0.0, (now - ts).total_seconds())
 
 
 # ---------------------------------------------------------------------------
@@ -127,12 +130,11 @@ def _load_cache() -> dict:
 
 
 def _save_cache(cache: dict) -> None:
-    try:
+    """缓存写失败不阻断（下次运行重新解析即可）。"""
+    with contextlib.suppress(OSError):
         CACHE_FILE.write_text(
             json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8"
         )
-    except Exception:
-        pass
 
 
 def resolve_handle(coin: str, client: httpx.Client | None = None) -> str | None:
@@ -146,8 +148,9 @@ def resolve_handle(coin: str, client: httpx.Client | None = None) -> str | None:
     if coin in cache:
         return cache[coin]
     c = client or _get_client()
-    # CoinGecko（首选）
-    try:
+    # 两个零 key 免费接口，任一 provider 出错就换下一个（整体失败返回 None →
+    # 装配层标 UNKNOWN）；suppress 表达的是「该 provider 不可用」，不是「出错了继续跑」
+    with contextlib.suppress(Exception):  # CoinGecko（首选）
         r = c.get(
             "https://api.coingecko.com/api/v3/search",
             params={"query": coin},
@@ -173,10 +176,7 @@ def resolve_handle(coin: str, client: httpx.Client | None = None) -> str | None:
                 cache[coin] = handle
                 _save_cache(cache)
                 return handle
-    except Exception:
-        pass  # 回退 CoinPaprika
-    # CoinPaprika（备选）
-    try:
+    with contextlib.suppress(Exception):  # CoinPaprika（备选）
         r = c.get(
             "https://api.coinpaprika.com/v1/search/",
             params={"q": coin, "c": "currencies"},
@@ -193,8 +193,6 @@ def resolve_handle(coin: str, client: httpx.Client | None = None) -> str | None:
                 cache[coin] = handle
                 _save_cache(cache)
                 return handle
-    except Exception:
-        pass
     return None
 
 
@@ -369,7 +367,9 @@ def post_frequency_days(posts: list[dict] | None) -> float | None:
 
 async def fetch_handle_stats(handle: str) -> dict | None:
     """有头浏览器 + 确定性 JS 提取指定 X 账号的数据 → build_stats dict。"""
-    from browser_use.browser.session import BrowserSession  # 延迟导入（mock 模式零依赖）
+    from browser_use.browser.session import (
+        BrowserSession,  # 延迟导入（mock 模式零依赖）
+    )
 
     profile_url = f"https://x.com/{handle}"
     browser = BrowserSession(

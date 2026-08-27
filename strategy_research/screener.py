@@ -1,7 +1,7 @@
 """screener — 确定性币种筛选（图外入口 ⑨，零 LLM）。
 
 main.py 装配顺序：``screener.select_tokens(rules, top_n)`` → ``graph.invoke``。
-规则引擎：Filter 依次 AND 过滤 → 单一 Rank 排序 → 截取 top_n。
+规则引擎：Filter 依次 AND 过滤 → 单一 Rank 排序 → 板块上限截断 top_n。
 快照失败抛 ``ScreeningError`` 批终止（全架构唯一允许终止的节点，入口没有
 静默降级的意义）；mock 模式返回固定候选（规格纪律 6/9）。
 """
@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .datasources import binance_futures
+from .datasources import binance_futures, defillama
 from .datasources.base import UNKNOWN
 from .datasources.mock import mock_screening_candidates
 from .env import is_mock_mode
@@ -214,6 +214,35 @@ DEFAULT_RULES = [
     ScreenRule("rank", "mispricing_24h"),
 ]
 
+#: 板块多样性上限（09 票）：同一板块最多进 Top N 的个数，0 = 关闭约束。
+#: 单一 rank 榜取前 N 会把候选押在同一板块的同一波次上（实测一次 6 币实跑的
+#: 候选里 BTW 与 SLX 同属 Basis Trading），整批证据随之高度相关，等于用 N 个
+#: 位置赌 1 条注。默认 3：既留得出同板块的横向对比，又不让某一板块独占。
+DEFAULT_MAX_PER_CATEGORY = 3
+
+
+def _diversify(rows: list[dict], top_n: int, cap: int) -> tuple[list[dict], int]:
+    """榜上取 Top N，同板块超额的行让位给榜后段（返回选中行 + 让位数）。
+
+    行的 ``category`` 缺失时以自身 symbol 独占一桶：DeFiLlama 板块索引对全市场
+    永续合约覆盖约四成（次新/meme 更低），把缺分类的行并成同一桶会凭空造出一个
+    「其他」板块并优先剔除其后段——UNKNOWN 纪律不允许拿缺数据当惩罚。代价照实
+    说明：纯 meme 波次仍能占满候选，所以板块一律写进 reason 供人工复核。
+    """
+    picked: list[dict] = []
+    counts: dict[str, int] = {}
+    skipped = 0
+    for row in rows:
+        if len(picked) >= top_n:
+            break
+        bucket = row.get("category") or f"#unknown:{row['symbol']}"
+        if counts.get(bucket, 0) >= cap:
+            skipped += 1
+            continue
+        counts[bucket] = counts.get(bucket, 0) + 1
+        picked.append(row)
+    return picked, skipped
+
 
 def _params_str(params: dict) -> str:
     if not params:
@@ -227,7 +256,7 @@ def describe(rules: list[ScreenRule]) -> list[str]:
 
 
 def _candidate(row: dict, rules_desc: str) -> dict:
-    """候选：symbol + reason（命中规则 + 指标值）+ metrics。"""
+    """候选：symbol + category（板块，未知 None）+ reason（命中规则 + 指标值）+ metrics。"""
     metrics = {
         k: row[k]
         for k in ("price_change_pct", "quote_volume", "listing_days")
@@ -235,11 +264,24 @@ def _candidate(row: dict, rules_desc: str) -> dict:
     }
     metric_desc = "、".join(f"{k}={v}" for k, v in metrics.items())
     reason = rules_desc if not metric_desc else f"{rules_desc} | {metric_desc}"
-    return {"symbol": row["symbol"], "reason": reason, "metrics": metrics}
+    category = row.get("category")
+    if category:
+        reason = f"{reason} | 板块={category}"
+    return {
+        "symbol": row["symbol"],
+        "category": category,
+        "reason": reason,
+        "metrics": metrics,
+    }
 
 
-def select_tokens(rules: list[ScreenRule], top_n: int = 10) -> ScreeningResult:
-    """确定性选币：全市场快照各 1 次 → 合约永续 USDT 白名单 → Filter AND → Rank → top_n。
+def select_tokens(
+    rules: list[ScreenRule],
+    top_n: int = 10,
+    max_per_category: int = DEFAULT_MAX_PER_CATEGORY,
+) -> ScreeningResult:
+    """确定性选币：全市场快照各 1 次 → 合约永续 USDT 白名单 → Filter AND → Rank
+    → 板块上限截断 Top N。
 
     快照任一失败抛 ``ScreeningError`` 批终止（失败即失败，不回退 mock）；
     无 rank 规则时跳过排序（防 StopIteration）。
@@ -247,6 +289,8 @@ def select_tokens(rules: list[ScreenRule], top_n: int = 10) -> ScreeningResult:
     仅保留永续合约 ``TRADING``（contractType=PERPETUAL，排除 XAUUSDT/TSLAUSDT
     等交割合约）且以 USDT 计价、标的非稳定币的交易对，排除 ETHBTC/BTCU 等
     非规范 symbol 进入候选。
+    ``max_per_category`` 为 0 时关闭板块约束；板块索引是辅助数据，拉取失败只
+    让约束不生效（并写进 rules 留痕），不终止批。
     """
     if is_mock_mode():
         return ScreeningResult(
@@ -302,9 +346,27 @@ def select_tokens(rules: list[ScreenRule], top_n: int = 10) -> ScreeningResult:
         except KeyError as exc:
             raise ScreeningError(f"未知排序规则: {rank_rules[0].name}") from exc
 
-    rules_desc = "、".join(describe(rules))
+    rules_desc_list = describe(rules)
+    picked = rows[:top_n]
+    if max_per_category > 0 and rows:
+        # 板块索引（一次请求，约 6.7MB）：辅助数据，失败只让约束不生效、不终止批
+        categories = defillama.fetch_protocol_categories() or {}
+        for row in rows:
+            row["category"] = categories.get(row["symbol"].removesuffix("USDT"))
+        if not categories:
+            rules_desc_list.append(
+                f"sector_cap(max_per_category={max_per_category}) 未生效：板块索引不可用"
+            )
+        else:
+            picked, skipped = _diversify(rows, top_n, max_per_category)
+            if skipped:
+                rules_desc_list.append(
+                    f"sector_cap(max_per_category={max_per_category})："
+                    f"{skipped} 个同板块超额候选让位"
+                )
+    rules_desc = "、".join(rules_desc_list)
     return ScreeningResult(
         mode="auto",
-        rules=describe(rules),
-        candidates=[_candidate(r, rules_desc) for r in rows[:top_n]],
+        rules=rules_desc_list,
+        candidates=[_candidate(r, rules_desc) for r in picked],
     )

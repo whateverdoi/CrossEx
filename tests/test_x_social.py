@@ -19,7 +19,6 @@ from strategy_research import signals as sig
 from strategy_research.datasources import mock as m
 from strategy_research.datasources import x_social
 
-
 # ── parse_compact_number ───────────────────────────────
 
 
@@ -248,10 +247,10 @@ def _posts(recent: int = 5) -> list[dict]:
 
 
 def test_social_heat_trend() -> None:
-    """最近 5 条均值 vs 其余中位数 → 正（热度上升）；样本/数值不足 → None。"""
+    """分档门槛：≥7 条近 5 vs 其余中位数；6 条 3 vs 3；<6 条 UNKNOWN。"""
     trend = sig.social_heat_trend(_posts())
     assert trend is not None and trend > 0
-    assert sig.social_heat_trend(_posts()[:6]) is None  # 样本 <7
+    assert sig.social_heat_trend(_posts()[:5]) is None  # 样本 <6
     assert sig.social_heat_trend(None) is None
     assert sig.social_heat_trend([]) is None
     zero = [{"likes": "0", "reposts": "0", "comments": "0", "time": f"{30 - i}d"} for i in range(30)]
@@ -267,6 +266,32 @@ def test_social_heat_trend() -> None:
     ]
     assert sig.social_heat_trend(small) is not None
     assert sig.social_heat_trend(small) > 0
+    # 6 条档（登录墙再截一档）：3 vs 3 退化算式，不再整域丢失
+    six = [
+        {"likes": "40", "reposts": "8", "comments": "5", "time": f"{6 - i}d"}
+        for i in range(3)
+    ]
+    six += [
+        {"likes": "120", "reposts": "30", "comments": "18", "time": f"{3 - i}d"}
+        for i in range(3)
+    ]
+    assert sig.social_heat_trend(six) == pytest.approx(217.0)  # 168/53 - 1
+    assert sig.social_heat_trend(list(reversed(six))) == pytest.approx(-68.5)
+
+
+def test_social_heat_window() -> None:
+    """档名与算式同源：档之间读数不可互相比较，故必须随读数留痕。"""
+    assert sig.social_heat_window(_posts()) == "recent5_vs_prior_median"
+    assert sig.social_heat_window(_posts()[:7]) == "recent5_vs_prior_median"
+    assert sig.social_heat_window(_posts()[:6]) == "recent3_vs_prior3_median"
+    assert sig.social_heat_window(_posts()[:5]) is None
+    assert sig.social_heat_window(None) is None
+    # 与读数同生死：分档 None 时热度必为 None（不会出现有值无档/有档无值）
+    for n in (0, 4, 5, 6, 7, 9, 30):
+        posts = _posts()[:n]
+        assert (sig.social_heat_trend(posts) is None) == (
+            sig.social_heat_window(posts) is None
+        )
 
 
 def test_social_price_divergence_quadrants() -> None:

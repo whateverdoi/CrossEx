@@ -141,30 +141,62 @@ def _resolve(root: dict, path: str) -> Any:
     return node
 
 
+#: 引用文本中的首个数值 token（可选负号；后缀单位与 % 由 search 天然跳过）
+_CITED_NUM_RE = re.compile(r"-?\d+(?:\.\d+)?")
+
+
+def _cited_number(expected: str) -> tuple[float, int] | None:
+    """引用文本 → (首个数值, 小数位数)；无数值 → None。
+
+    摘要渲染值自带单位后缀（``3.23 天/条``）与 ``%``（``6.62%``），旧实现
+    ``float(expected.rstrip("%"))`` 遇到任何后缀直接解析失败 → 把摘要自己
+    渲染出的文本判为「值不一致」（误杀）。此处只取数值本体比对，后缀口径
+    交给摘要内嵌的字段定义注记。
+    """
+    match = _CITED_NUM_RE.search(expected.replace(",", ""))
+    if not match:
+        return None
+    token = match.group(0)
+    try:
+        return float(token), len(token.partition(".")[2])
+    except ValueError:
+        return None
+
+
+def _precision_tol(decimals: int) -> float:
+    """引用精度的半个最小单位（+ 浮点余量）。
+
+    逐字契约下 LLM 引用值与快照的唯一合法差异 = 摘要渲染时的四舍五入，
+    误差半格即够；旧固定绝对 0.05 放在 funding 量级（真实 0.000267）上
+    等于放行 100 倍单位错误（引用 0.03 通过）。
+    """
+    return 0.5 * 10.0 ** (-max(0, decimals)) + 1e-9
+
+
 def _values_match(actual: Any, expected: str) -> bool:
-    """快照值 vs 引用值（字符串）规范化比较：数值近似 / 其余严格相等。
+    """快照值 vs 引用值（字符串）规范化比较：数值按引用精度判等 / 其余严格相等。
 
     None（UNKNOWN 纪律）不可作为证据引用，一律不匹配。
-    数值容差（06 票）：固定绝对 0.05——LLM 引用值来自摘要渲染（最长 1 位小数，
-    最坏舍入 0.05），允许渲染精度误差；不用相对容差，防止 0.1% 量级的错值被放行。
     """
     if actual is None:
         return False
     if isinstance(actual, bool):
         return str(actual) == expected
     if isinstance(actual, (int, float)):
-        exp = expected.rstrip("%").strip()  # 百分比字段摘要把值渲染成 6.62%，
-        # LLM 按逐字契约引用带 % 后缀——比较前剥离（06 票）
-        try:
-            expected_num = float(exp)
-        except (TypeError, ValueError):
+        cited = _cited_number(expected)
+        if cited is None:
             return False
-        return abs(float(actual) - expected_num) <= max(1e-6, 0.05)
+        expected_num, decimals = cited
+        return abs(float(actual) - expected_num) <= _precision_tol(decimals)
     if isinstance(actual, str) and expected.startswith(actual + "（"):
         # 标签型复合值渲染为 {label}（{note}），LLM 可能整串引用（含注释）：
         # 剥离全角括号注释后比较（宽容纪律，同 label 下钻；仅限“（”前缀防误放）
         return True
     return str(actual) == expected
+
+
+#: claim 数值 token + 紧随其后的 %（% 决定允许放大到百分数口径）
+_CLAIM_NUM_RE = re.compile(r"(-?\d+(?:\.\d+)?)\s*(%?)")
 
 
 def _claim_unknown_numbers(
@@ -177,24 +209,46 @@ def _claim_unknown_numbers(
     千分位逗号（309,759,196.53）、负值字段的绝对值表述（下跌 15.59% ↔ 快照
     -15.59）、单位换算（39.9 亿 ↔ 3994766092.68，10^k 缩放）。只抓数字真实
     性，不判归属——归属错误（借其他字段数值）靠 prompt 纪律，核验无语义能力。
+    缩放纪律（09 票改）：不带 % 的数值只允许缩小（放大放行编造值，
+    99.99 ≈ 1.0×10²）；带 % 的数值额外允许 ×10/×100——比率字段摘要按原始
+    小数渲染（up_ratio_24h: 0.60），表述成「60%」是同量的合法派生表述，
+    旧实现把它判为编造（误杀）。容差取引用精度的半格，与 _values_match 同构。
     """
     if not claim:
         return []
-    hay = [float(m) for m in re.findall(r"-?\d+(?:\.\d+)?", visible.replace(",", ""))]
+    hay = [
+        abs(float(m)) for m in re.findall(r"-?\d+(?:\.\d+)?", visible.replace(",", ""))
+    ]
     missing: list[str] = []
-    for num in re.findall(r"-?\d+(?:\.\d+)?", claim.replace(",", "")):
+    for match in _CLAIM_NUM_RE.finditer(claim.replace(",", "")):
+        token, is_pct = match.group(1), bool(match.group(2))
         try:
-            v = abs(float(num))
+            v = abs(float(token))
         except ValueError:
             continue
-        if not any(
-            abs(abs(h) * (10**k) - v) <= max(1e-6, 0.05)
-            for h in hay
-            for k in range(-9, 1)  # 只允许缩小（亿/万/千分位换算），禁止放大——
-            # 放大会把编造值放行（99.99 ≈ 1.0×10²）
-        ):
-            missing.append(num)
+        tol = _precision_tol(len(token.partition(".")[2]))
+        # 不带 %：只允许缩小；带 %：再多允许 ×10 / ×100（小数→百分数）
+        scales = range(-9, 3) if is_pct else range(-9, 1)
+        if not any(abs(h * (10**k) - v) <= tol for h in hay for k in scales):
+            missing.append(token + ("%" if is_pct else ""))
     return missing
+
+
+_INDEX_SEG_RE = re.compile(r"\[\d+\]")
+
+
+def _invisible_index(field: str, visible: str) -> str | None:
+    """basis 引用的列表下标未在摘要中出现 → 该下标段；否则 None（弱检查）。
+
+    摘要对序列有截断（新闻 ≤3 条、推文明细最近 10 条），核验却按 state 全量
+    解引用：不校验下标，LLM 引用一条从未见过的早期推文、只要数值碰巧对得上
+    就能通过——等于凭空编造也能过关。下标段含方括号，不会误配（[1] 不匹配
+    [10]）。同源纪律：只判是否可见，不判归属。
+    """
+    for seg in _INDEX_SEG_RE.findall(field):
+        if seg not in visible:
+            return seg
+    return None
 
 
 def _verify_item(
@@ -218,6 +272,12 @@ def _verify_item(
         }
     if not field:
         return None, {"claim": item.get("claim") or "", "reason": "basis 字段路径为空"}
+    invisible = _invisible_index(field, visible)
+    if invisible:
+        return None, {
+            "claim": item.get("claim") or "",
+            "reason": f"引用了摘要未渲染的列表下标: {field}（{invisible}）",
+        }
     actual = _resolve(root, field)
     if (
         actual is _MISSING

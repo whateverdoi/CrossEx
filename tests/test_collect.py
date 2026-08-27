@@ -178,11 +178,16 @@ def test_mock_collect_full_snapshot() -> None:
         "drawdown_1y",
         "vol_adj_ret_7d",
         "vol_adj_ret_30d",
-        "beta_7d",
         "beta_30d",
-        "alpha_7d",
         "alpha_30d",
-        "funding_z",
+        "funding_x_pctile",
+        "funding_interval_hours",
+        "funding_carry_7d_pct",
+        "funding_carry_30d_pct",
+        "spread_pct",
+        "bid_depth_usd_2pct",
+        "ask_depth_usd_2pct",
+        "depth_band_state",
         "error",
         "futures_error",
         "incomplete",
@@ -195,6 +200,15 @@ def test_mock_collect_full_snapshot() -> None:
     assert (
         mkt["funding_pctile_90d"]["value"] == 20.0
     )  # mock 费率 5 档周期，最新为最低档
+    # 交易结构：mock 费率序列 8h 一步 → 间隔 8h；0.0001×3×7×100 = 0.21
+    assert mkt["funding_interval_hours"]["value"] == 8.0
+    assert mkt["funding_carry_7d_pct"]["value"] == pytest.approx(0.21)
+    assert mkt["funding_carry_30d_pct"]["value"] == pytest.approx(0.9)
+    # mock 盘口 100 档间距 0.03% → 完整覆盖 2% 带 → 深度为实测而非下限
+    assert mkt["depth_band_state"]["value"] == "band_complete"
+    assert mkt["spread_pct"]["value"] == pytest.approx(0.03, abs=1e-4)
+    assert mkt["bid_depth_usd_2pct"]["value"] > 0
+    assert mkt["funding_x_pctile"]["value"] is not None  # 全市场分布过样本门槛
     assert mkt["incomplete"] is False
 
     fund = res["fundamental_data"]["UNI"]
@@ -225,17 +239,15 @@ def test_mock_collect_full_snapshot() -> None:
         "ls_ratio_all_change_24h",
         "ls_ratio_top_acc",
         "ls_ratio_top_pos",
-        "taker_bs_ratio",
+        "taker_bs_ratio_1h",
         "liq_long_24h",
         "liq_short_24h",
         "liq_total_24h",
         "liq_total_oi_ratio",
         "liq_imbalance",
-        "board",
         "error",
         "incomplete",
     }
-    assert ms["board"] is None  # PoC 阶段固定 None
     assert ms["oi_change_24h"]["value"] == 0.0  # mock 序列恒定 → 0%
     assert ms["oi_change_48h"]["value"] == 0.0  # 96 点跨 95h，48h 窗口可算
     # mock oi 变化恒 0 → 背离无方向；价格变化 2.5%（BTC）→ 不缺失
@@ -378,7 +390,7 @@ def test_real_path_maps_fields_and_unknown_kind(
 
     ms = res["microstructure_data"]["BTC"]
     assert ms["oi_change_24h"]["source"] == "binance_futures"
-    assert ms["taker_bs_ratio"]["value"] == 1.0  # mock taker 恒定 1.0
+    assert ms["taker_bs_ratio_1h"]["value"] == 1.0  # mock taker 恒定 1.0
 
     web = res["web_data"]["BTC"]
     assert web["items"] is not None

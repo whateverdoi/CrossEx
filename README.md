@@ -10,7 +10,7 @@ cp .env.example .env
 # 编辑 .env 填入 DEEPSEEK_API_KEY
 
 # 2. 真实模式运行（自动筛选币种 → 全管线 → 报告落盘）
-source /home/lhh/Projects/python_projects/.venv/bin/activate
+source /home/lhh/pythonprojects/.venv/bin/activate
 python -m strategy_research.main
 
 # 3. 全离线 mock 模式（零外部请求，无需任何 Key，回归验证用）
@@ -19,7 +19,7 @@ SR_MOCK=1 python -m strategy_research.main
 
 ## 环境要求与安装
 
-- Python 3.14（本机虚拟环境 `/home/lhh/Projects/python_projects/.venv`，包管理用 `uv pip`）
+- Python 3.13（本机虚拟环境 `/home/lhh/pythonprojects/.venv`，实测 3.13.5；包管理用 `uv pip`）
 - 依赖：`langgraph` / `langchain` / `langchain-deepseek`、`pydantic`、Binance 官方 SDK（`binance-sdk-spot` / `binance-sdk-derivatives-trading-usds-futures` / `binance-common`）、`httpx`、`python-dotenv`；开发依赖 `pytest` / `ruff`
 
 ## 配置（.env）
@@ -34,7 +34,7 @@ SR_MOCK=1 python -m strategy_research.main
 | `SR_SCAN_DIR` | 可选 | 扫描器快照目录覆盖（默认 `~/Projects/python_projects/BinanceApi/data/research`） |
 | `SR_SCAN_DATE` | 可选 | 强制指定快照日期（默认取目录内最新） |
 
-数据源层（Binance / DefiLlama / 新闻 RSS）零环境变量，无需配置。
+数据源层（Binance / DefiLlama / OKX / X 公开主页 / 新闻 RSS）零环境变量，无需配置。
 
 ## 使用方式
 
@@ -73,8 +73,15 @@ SR_MOCK=1 python -m strategy_research.main
 ### 4. 筛选参数
 
 ```bash
-python -m strategy_research.main --top-n 20   # 候选数（默认 10）
+python -m strategy_research.main --top-n 20                # 候选数（默认 10）
+python -m strategy_research.main --max-per-category 2      # 同一板块最多候选数（默认 3）
+python -m strategy_research.main --max-per-category 0      # 关闭板块约束
 ```
+
+板块约束是确定性的候选层规则：Top N 排序后按板块截断，同板块超额者让位给后续名次的
+异板块候选（避免整批挤在同一叙事上）。板块标签来自 DefiLlama 协议索引，`0` 时不发起该
+请求（约 6.7MB）；索引不可用时约束不生效并写入 `meta.screening.rules` 留痕，无板块标签
+的候选不受罚（UNKNOWN 纪律）。候选的 `reason` 会附 `板块=xxx`。
 
 ### 5. 图编译冒烟
 
@@ -89,9 +96,14 @@ python -m pytest                    # 全量单测（mock 模式，零外部请�
 python -m ruff check strategy_research/ tests/
 ```
 
+两条常驻守卫值得知道：`tests/test_data_coverage.py` 是**数据覆盖契约**——遍历 mock
+快照各数据域的有值字段，字段名必须出现在分支摘要里，否则必须落在显式隐藏白名单（附
+理由）；新增数据抓了不喂，测试先红。mock/live 同构由交叉验证测试钉住（同一批纯函数、
+逐值一致），因此 mock 回归不是玩具路径。
+
 ### 7. 扫描器快照（自动补跑，无需手动操作）
 
-报告中的**榜单/微观结构数据**（boards、多窗口涨跌幅、OI 变化、多空比、taker 比、funding 趋势）来自 BinanceApi 项目的每日扫描器产出 CSV（`data/research/{date}_all/movers/microstructure.csv`），本 agent 只读消费。
+报告中的**榜单截面数据**（`boards` 榜单归属、`ret_1h/4h/24h/7d` 多窗口收益、期货溢价、`onboard_date`，以及 CSV 侧的 OI/多空比/taker/funding 趋势历史窗口）来自 BinanceApi 项目的每日扫描器产出 CSV（`data/research/{date}_all/movers/microstructure.csv`），本 agent 只读消费。它与本项目 `datasources/` 直连 Binance/OKX 取得的实时微观结构（OI 变化与背离、多空比、taker 比、爆仓失衡、盘口点差与深度）是**互补两条路**，不互相替代。
 
 **新鲜度由 main 自动保证**：非 mock 模式下，`main` 启动时检查快照日期——若距今天超过 1 天（陈旧），自动以子进程调用 BinanceApi 的 `research/scan.py` 补跑（全市场约 15 分钟），产出当日快照后再继续运行。**你不需要手动跑扫描器**，也不需要任何额外步骤：
 
@@ -102,14 +114,46 @@ python -m strategy_research.main   # 陈旧 → 自动补跑 → 用当日快照
 - 补跑状态写入 `run.json.meta.scanner`（`fresh` / `refreshed` / `failed` / `unavailable`），失败不阻断运行（沿用旧快照 + 留痕）
 - mock 模式不触发补跑（离线纪律）；`SR_SCAN_AUTO=0` 可关闭
 - 快照日期会渲染在 `evidence.md` 每币标题下，可随时核对数据新鲜度
+- **前置条件**：自动补跑要求 BinanceApi 项目存在于默认路径 `~/Projects/python_projects/BinanceApi`。
+  该路径不存在时状态为 `unavailable`（不补跑、不报错），**丢的是 `scanner_snapshot` 这一整节**：
+  榜单归属 `boards`、`ret_1h/4h/24h/7d` 多窗口收益、`futures_premium_pct`、`onboard_date`
+  及 CSV 侧的 OI/多空比/taker/funding 趋势历史窗口——摘要里该节整节不渲染（有 `if` 保护）。
+  本项目自己直连的微观结构照常取值：OI 变化与背离、全市场/大户多空比、taker 比、
+  OKX 爆仓失衡、盘口点差与双边深度、funding 历史分位。
+  核对方式：`run.json.meta.scanner.status` + `evidence.md` 每币标题下的快照日期；
+  项目在其他位置时用 `SR_SCAN_DIR` 指向其 `data/research` 目录。
+
+### 8. 「信号 vs 价格」回看（离线评估器，不进管线）
+
+系统本身不产方向结论（ADR 0001），但**信号的预测力可以离线描述性地度量**：
+`strategy_research/lookback.py` 只读历史 `reports/*/run.json` 里的信号快照，
+用 `closed_daily_returns`（基准 = 决策时最近已收盘日线，前视只取其后的日 K）
+计算每个信号字段在 N 日窗口上与前视收益（及减 BTC 后的超额收益）的 Spearman
+秩相关和三等分分组收益差：
+
+```bash
+python -m strategy_research.lookback                                  # markdown 读数
+python -m strategy_research.lookback --horizons 1,3,7,14 --json       # 结构化输出
+python -m strategy_research.lookback --root reports                    # 历史目录（默认 reports）
+```
+
+- **只读、零 LLM、图外**：不写任何工件、不改管线，输出打到 stdout
+- 只采信 `mode=live` 的 run；同日多次运行只取当日首次（否则 1 个观测被当成 2 个）
+- 窗口未收盘的 (run, horizon) 不采（否则读数不可复现），丢弃项以 `[warn]` 列出
+- 值为 None 或分类标签（`quadrant` / `label` / `depth_band_state`）的字段不参与秩相关
+- 历史 run 里的退役字段（如 `funding_z`）不进表，单独列为「schema 漂移」警告
+
+读数必须连同报告头部的四条边界一起看：选币自选择（只是候选池内相对）、窗口重叠
+（ρ 不能按独立样本解读）、多重比较（同一批信号在多窗口×多字段上重复读取）、
+以及**本表不含方向结论、置信度与仓位含义**。
 
 ## 管线概览
 
 ```
 screener（图外入口，确定性筛选）
    ↓ tokens
-① collect_data      确定性：行情/估值/微观结构快照（含 funding 分位、OI 价格背离）
-② compute_signals   确定性：估值/动量/背离 + sentiment 拥挤度纯函数
+① collect_data      确定性：行情/估值/微观结构/爆仓/社交（X）快照（含 funding 分位、OI 价格背离）
+② compute_signals   确定性：估值/动量/背离/交易结构 + sentiment（持仓与社交指标原始直读）纯函数
 bull_research       多头证据研究员（json_mode 单次调用，数量不设上限）
 bear_research       空头证据研究员（json_mode 单次调用，数量不设上限）
 ③ evidence_verify   确定性核验：basis 逐级解引用，剔除留痕
@@ -129,7 +173,7 @@ bear_research       空头证据研究员（json_mode 单次调用，数量不�
 | `evidence.md` | 证据陈列文档（总览表 + 每 token 做多/做空证据表 + 剔除记录附录） |
 | `run.json` | 运行元数据（模式/规则/LLM 成本）+ 证据清单 + 数据快照投影 + 信号快照 |
 | `candidates.json` | 候选币种列表（仅候选，分级退役） |
-| `snapshot.json` | 信号快照（quadrant/momentum/funding_pctile_90d/oi_price_divergence/趋势特征） |
+| `snapshot.json` | 信号快照（当前信号集 28 键 per-token：quadrant/momentum、rv_7d/30d、drawdown_1y、turnover、vol_adj_ret、funding 分位与横截面分位、持仓成本三项、点差/双边深度/深度档位、爆仓失衡、OI 价格背离、α/β(30d)、趋势特征、社交热度趋势与样本档名、发帖频率、社交/价格背离） |
 | `signal_diff.json` | 与上次运行的信号对比（action ∈ new/changed/unchanged） |
 
 ## 目录结构
@@ -140,15 +184,16 @@ strategy_research/
 ├── graph.py            # 6 节点装配 + 编译冒烟
 ├── nodes.py            # 各节点实现（数据装配/信号/分支/核验/报告）
 ├── signals.py          # 确定性信号纯函数（无 IO，缺失 → None）
-├── screener.py         # 币种筛选规则引擎（Filter AND → Rank Top N）
+├── screener.py         # 币种筛选规则引擎（Filter AND → Rank Top N → 板块上限）
 ├── scanner_snapshot.py # 扫描器快照读取 + 陈旧自动补跑（子进程）
 ├── schemas.py          # 宽容 JSON 解析器（_extract_json 系列）
 ├── evidence.py         # 证据体系（EvidenceItem + 确定性核验）
 ├── context.py          # 分支 prompt + 摘要构建器 + 情绪解读注记
 ├── report.py           # 报告落盘与工件生成
+├── lookback.py         # 图外只读工具：「信号 vs 价格」回看评估（离线、零 LLM、不写工件）
 ├── state.py            # LangGraph state 定义
 ├── env.py              # LLM 装配（DeepSeek / mock）
-└── datasources/        # 数据源装配层（binance / binance_futures / defillama / web / mock）
+└── datasources/        # 数据源装配层（binance / binance_futures / defillama / okx / x_social / web / mock）
 ```
 
 ## 相关文档

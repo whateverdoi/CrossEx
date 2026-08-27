@@ -1,5 +1,13 @@
 # Scout Report — Prediction-Quality Architectural Friction
 
+> **本文件已过期（2026-08 证据分支重构前的审计快照），勿作现状依据。**
+> 它引用的 `strategy_research/review.py`、`DECIDE_PROMPT`、`TokenAnalysis`、
+> `tests/test_risk_check.py` 均已退役删除；第 1 条与文末「Start here」建议补的
+> 决策/置信度校准回路，是 `docs/adr/0001` 刻意退役的对象——信号 vs 价格的历史
+> 相关性改由图外只读工具 `strategy_research/lookback.py` 度量。
+> 领域词汇表是**大写** `CONTEXT.md`（两者文件名只差大小写，勿混读）。
+> 审计时点后的整改结果见 `.scratch/` 票面与 git log。
+
 ## 1. Decision-review feedback loop is NOT a feedback loop (BLOCKER)
 - `review_past_decisions` (`review.py:167`) and its `_calibrate` stats are consumed ONLY by report rendering: `report.py:61`, `report.py:271-285`. Stats land in `run.json["decision_review"]` (`report.py:85`).
 - Nothing feeds `hit_rate`/`by_confidence`/`by_decision` back into `DECIDE_PROMPT` (`schemas.py:355`) or any pipeline state. Grep for `stats|hit_rate|calibrat` shows no LLM-prompt or state consumption outside `review.py`/`report.py`. So LLM never sees its own calibration; hit-rate cannot influence future prompts.

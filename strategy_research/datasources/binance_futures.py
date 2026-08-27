@@ -292,6 +292,49 @@ def fetch_fapi_prices_all() -> dict[str, float] | None:
     return prices
 
 
+def fetch_order_book(symbol: str, limit: int = 100) -> dict | None:
+    """合约盘口档位（fapi/v1/depth，limit=100 权重 5，单 symbol）。
+
+    交易结构（可执行性）维度的原始数据：本函数只做字段转换，点差/带内
+    深度的算术在 ``signals.book_structure``（纯函数可单测）。
+    返回 ``{symbol, bids: [[price, qty], ...], asks: [...]}``（价格降/升序，
+    原样透传端点排序）；失败或结构非法返回 ``None``（UNKNOWN 纪律）。
+    """
+    if env.is_mock_mode():
+        return mock.mock_order_book(symbol)
+    client = _binance_sdk.get_futures_data_client()
+    try:
+        data = _binance_sdk.sync_call_with_rate_limit(
+            client.order_book, symbol=symbol, limit=limit, name="depth(fapi)", weight=5
+        )
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    bids, asks = data.get("bids"), data.get("asks")
+    if not isinstance(bids, list) or not isinstance(asks, list):
+        return None
+    return {
+        "symbol": data.get("symbol", symbol),
+        "bids": _levels(bids),
+        "asks": _levels(asks),
+    }
+
+
+def _levels(rows: list) -> list[list[float]]:
+    """盘口档位 → [[价格, 数量], ...]（非数值行丢弃，数量缺省计 0）。"""
+    out: list[list[float]] = []
+    for r in rows:
+        if not isinstance(r, (list, tuple)) or not r:
+            continue
+        price = _float_or_none(r[0])
+        qty = _float_or_none(r[1]) if len(r) > 1 else None
+        if price is None:
+            continue
+        out.append([price, qty if qty is not None else 0.0])
+    return out
+
+
 def fetch_fapi_ticker_24h_all() -> dict[str, dict] | None:
     """全量合约 24hr ticker（fapi/v1/ticker/24hr，权重 40，批内一次）。
 

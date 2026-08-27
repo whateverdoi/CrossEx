@@ -14,8 +14,9 @@ from strategy_research.datasources import mock as m
 from strategy_research.datasources.mock import MOCK_TOKENS
 
 #: sentiment components 字段集（规格 ② 6 字段 + 票 05 的 ls_ratio_top_acc
-#: + 票 14 的 funding_pctile_90d / oi_price_divergence + 票 08 的 funding_z
-#: + social_data 的 social_heat_trend / social_price_divergence）
+#: + 票 14 的 funding_pctile_90d / oi_price_divergence + 票 08 的
+#: funding_x_pctile（原 funding_z 退役）+ social_data 的
+#: social_heat_trend / social_price_divergence）
 _COMPONENT_KEYS = {
     "funding",
     "funding_pctile_90d",
@@ -23,10 +24,10 @@ _COMPONENT_KEYS = {
     "ls_ratio_all",
     "ls_ratio_top_acc",
     "ls_ratio_top_pos",
-    "taker_bs_ratio",
+    "taker_bs_ratio_1h",
     "oi_change_24h",
     "oi_price_divergence",
-    "funding_z",
+    "funding_x_pctile",
     "social_heat_trend",
     "social_price_divergence",
 }
@@ -82,15 +83,20 @@ def _mkt(**over: object) -> dict:
         "funding_avg_7d": _dp(0.0001),
         "funding_trend": _dp("rising"),
         "funding_pctile_90d": _dp(50.0),
-        "funding_z": _dp(0.5),
+        "funding_x_pctile": _dp(80.0),
+        "funding_interval_hours": _dp(8.0),
+        "funding_carry_7d_pct": _dp(0.21),
+        "funding_carry_30d_pct": _dp(0.9),
+        "spread_pct": _dp(0.02),
+        "bid_depth_usd_2pct": _dp(2.4e6),
+        "ask_depth_usd_2pct": _dp(2.1e6),
+        "depth_band_state": _dp("band_complete"),
         "rv_7d": _dp(40.0),
         "rv_30d": _dp(35.0),
         "drawdown_1y": _dp(-5.0),
         "vol_adj_ret_7d": _dp(1.5),
         "vol_adj_ret_30d": _dp(2.0),
-        "beta_7d": _dp(1.1),
         "beta_30d": _dp(1.05),
-        "alpha_7d": _dp(0.001),
         "alpha_30d": _dp(0.002),
         "oi": _dp(1e9),
         "basis": _dp(0.0),
@@ -117,8 +123,7 @@ def _ms(**over: object) -> dict:
         "ls_ratio_all_change_24h": _dp(0.1),
         "ls_ratio_top_acc": _dp(1.2),
         "ls_ratio_top_pos": _dp(1.1),
-        "taker_bs_ratio": _dp(1.0),
-        "board": None,
+        "taker_bs_ratio_1h": _dp(1.0),
         "error": None,
         "incomplete": False,
     }
@@ -283,10 +288,16 @@ def test_liquidation_imbalance() -> None:
     assert got["label"] == "short_heavy"
     got = sig.liquidation_imbalance(600_000.0, 550_000.0)
     assert got["label"] == "balanced"
-    got = sig.liquidation_imbalance(100.0, 0.0)
+    got = sig.liquidation_imbalance(100_000.0, 0.0)
     assert got["label"] == "long_heavy" and got["ratio"] is None  # 避免 inf
-    got = sig.liquidation_imbalance(0.0, 100.0)
+    got = sig.liquidation_imbalance(0.0, 100_000.0)
     assert got["label"] == "short_heavy"
+    # 尘埃爆仓门槛：合计低于 _LIQ_IMBALANCE_MIN_TOTAL_USD 不出标签（实测几十
+    # 美元级爆仓曾打出 long_heavy 被 LLM 当强证据引用）
+    assert sig.liquidation_imbalance(100.0, 0.0) is None
+    assert sig.liquidation_imbalance(0.0, 100.0) is None
+    assert sig.liquidation_imbalance(6_000.0, 3_999.0) is None  # 合计 9999 < 门槛
+    assert sig.liquidation_imbalance(6_000.0, 4_000.0)["label"] == "long_heavy"
 
 
 # ── sentiment_raw ──────────────────────────────────────────
@@ -302,13 +313,13 @@ def test_sentiment_raw() -> None:
         "ls_ratio_all": 1.05,
         "ls_ratio_top_acc": 1.2,
         "ls_ratio_top_pos": 1.1,
-        "taker_bs_ratio": 1.0,
+        "taker_bs_ratio_1h": 1.0,
         "oi_change_24h": 2.0,
         "oi_price_divergence": {
             "label": "confirm_long",
             "note": "价涨 OI 增：新多进场，趋势确认",
         },
-        "funding_z": 0.5,
+        "funding_x_pctile": 80.0,
         "social_heat_trend": None,  # 未传 soc → None（UNKNOWN 纪律）
         "social_price_divergence": None,
     }
@@ -394,28 +405,93 @@ def test_series_trend() -> None:
 # ── 第一层派生（08 票） ─────────────────────────────────
 
 
-def test_funding_cross_sectional_z() -> None:
-    """正常 / 缺失 / 异常：固定 4 主币参照系 σ 离差；无离散 → 0.0；样本 <2 → None。"""
-    rates = {
-        "BTCUSDT": 0.0001,
-        "ETHUSDT": 0.0001,
-        "BNBUSDT": 0.0003,
-        "SOLUSDT": 0.0001,
-        "UNIUSDT": 0.0005,
-    }
-    # mean=0.00015, std≈8.66e-5 → UNI: 0.00035/std ≈ 4.04；BTC: -0.00005/std ≈ -0.58
-    assert sig.funding_cross_sectional_z(rates, "UNIUSDT") == pytest.approx(4.04, abs=0.02)
-    assert sig.funding_cross_sectional_z(rates, "BTCUSDT") == pytest.approx(-0.58, abs=0.02)
-    # 参照系无离散 → 0.0（不猜方向）
-    const = {s: 0.0001 for s in ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT")}
-    assert sig.funding_cross_sectional_z(const, "BTCUSDT") == 0.0
-    # 缺失 / 异常：输入缺失 / 参照系样本 <2 / 目标不在表内 / 非法值过滤
-    assert sig.funding_cross_sectional_z(None, "BTCUSDT") is None
-    assert sig.funding_cross_sectional_z({}, "BTCUSDT") is None
-    assert sig.funding_cross_sectional_z(rates, "DOGEUSDT") is None  # 目标缺失
-    assert sig.funding_cross_sectional_z({"BTCUSDT": 0.0001}, "BTCUSDT") is None
-    bad = {**rates, "ETHUSDT": "n/a"}  # 非数值参照系成员过滤后仍 3 个 → 正常算
-    assert sig.funding_cross_sectional_z(bad, "UNIUSDT") is not None
+def test_funding_cross_sectional_pctile() -> None:
+    """正常 / 缺失 / 异常：全市场费率有符号分位；无离散 → 50.0；样本不足 → None。
+
+    原 4 主币 z 分退役原因：主币费率彼此几乎相等 → σ 近 0 → 实测产出
+    +8.33/−28.48 这类无意义值并被 LLM 当作排序第一的强证据引用。
+    """
+    rates = {f"S{i}USDT": i * 0.0001 for i in range(25)}
+    assert sig.funding_cross_sectional_pctile(rates, "S24USDT") == 100.0
+    assert sig.funding_cross_sectional_pctile(rates, "S0USDT") == 4.0
+    assert sig.funding_cross_sectional_pctile(rates, "S12USDT") == 52.0
+    # 分布退化（全市场同值）→ 50.0（无横截面离差信息，不猜方向）
+    const = {f"S{i}USDT": 0.0001 for i in range(25)}
+    assert sig.funding_cross_sectional_pctile(const, "S0USDT") == 50.0
+    # 缺失 / 异常：输入缺失 / 样本数低于门槛 / 目标不在表内
+    assert sig.funding_cross_sectional_pctile(None, "S0USDT") is None
+    assert sig.funding_cross_sectional_pctile({}, "S0USDT") is None
+    assert sig.funding_cross_sectional_pctile(rates, "DOGEUSDT") is None
+    small = {f"S{i}USDT": i * 0.0001 for i in range(sig._FUNDING_X_MIN_SAMPLES - 1)}
+    assert sig.funding_cross_sectional_pctile(small, "S0USDT") is None
+    # 非数值成员过滤后仍过门槛 → 照常计算
+    bad = {**rates, "S1USDT": "n/a"}
+    assert sig.funding_cross_sectional_pctile(bad, "S24USDT") is not None
+
+
+# ── 交易结构（可执行性） ───────────────────────────────────
+
+
+def test_funding_interval_hours() -> None:
+    """结算间隔：相邻费率时间戳差中位数；8h/4h/1h 合约各归各值。
+
+    一律按 8h 假设会把 1h 结算合约的持仓成本低估 8 倍——本函数存在的理由。
+    """
+    step = 3_600_000
+
+    def _rows(hours: float, n: int) -> list[dict]:
+        return [{"funding_time": i * hours * step} for i in range(n)]
+
+    assert sig.funding_interval_hours(_rows(8.0, 10)) == 8.0
+    assert sig.funding_interval_hours(_rows(4.0, 10)) == 4.0
+    assert sig.funding_interval_hours(_rows(1.0, 10)) == 1.0
+    assert sig.funding_interval_hours(None) is None
+    assert sig.funding_interval_hours([]) is None
+    assert sig.funding_interval_hours(_rows(8.0, 1)) is None  # 样本 <2
+    # 乱序输入 → 内部排序后仍得同值
+    assert sig.funding_interval_hours(list(reversed(_rows(8.0, 6)))) == 8.0
+    # 时间戳非法（字符串/None）过滤后不足 2 个 → None
+    assert sig.funding_interval_hours([{"funding_time": "x"}, {"funding_time": None}]) is None
+
+
+def test_funding_carry_pct() -> None:
+    """持有 N 天资金费成本：与涨跌幅同尺度；间隔是必须入参的维度。"""
+    # 0.0001 × (24/8) × 7 × 100 = 0.21
+    assert sig.funding_carry_pct(0.0001, 8.0, 7) == pytest.approx(0.21)
+    # 同费率但 1h 结算 → 成本高 8 倍（旧 8h 假设的低估倍数）
+    assert sig.funding_carry_pct(0.0001, 1.0, 7) == pytest.approx(1.68)
+    # 负费率 = 空头付费，多头收取（符号保留，不取绝对值）
+    assert sig.funding_carry_pct(-0.0001, 8.0, 30) == pytest.approx(-0.9)
+    assert sig.funding_carry_pct(None, 8.0, 7) is None
+    assert sig.funding_carry_pct(0.0001, None, 7) is None
+    assert sig.funding_carry_pct(0.0001, 0.0, 7) is None  # 间隔 ≤0 除零
+    assert sig.funding_carry_pct(0.0001, 8.0, 0) is None  # days ≤0 无意义
+
+
+def test_book_structure() -> None:
+    """点差 + 带内深度；档位覆盖不足时标记深度只是下限；盘口缺失 → 全 None。"""
+    asks = [[101.0, 20.0], [102.0, 20.0], [106.0, 20.0]]
+    got = sig.book_structure({"bids": [[99.0, 10.0], [98.5, 10.0], [97.0, 10.0]], "asks": asks})
+    assert got["spread_pct"] == pytest.approx(2.0)  # 中价 100，价差 2
+    assert got["bid_depth_usd"] == pytest.approx(1975.0)  # 带 [98,100]：99 + 98.5
+    assert got["ask_depth_usd"] == pytest.approx(4060.0)  # 带 [100,102]：101 + 102
+    assert got["depth_band_exhausted"] is False
+    # 末档仍落在带内 → 档位被带宽截断，累计值只是下限
+    thin = sig.book_structure({"bids": [[99.0, 10.0], [98.0, 10.0]], "asks": asks})
+    assert thin["depth_band_exhausted"] is True
+    assert thin["bid_depth_usd"] == pytest.approx(1970.0)
+    # 自定义带宽参数生效
+    wide = sig.book_structure({"bids": [[99.0, 10.0]], "asks": asks}, band_pct=1.0)
+    assert wide["bid_depth_usd"] == pytest.approx(990.0)
+    # 缺失 / 单侧为空 → 全 None（UNKNOWN 纪律，不以单边猜点差）
+    for book in (None, {}, {"bids": [], "asks": asks}, {"bids": [[99.0, 10.0]], "asks": []}):
+        got = sig.book_structure(book)
+        assert got == {
+            "spread_pct": None,
+            "bid_depth_usd": None,
+            "ask_depth_usd": None,
+            "depth_band_exhausted": None,
+        }
 
 
 def test_volatility_metrics() -> None:
@@ -456,7 +532,7 @@ def test_volatility_metrics() -> None:
 
 def test_beta_alpha() -> None:
     """正常 / 缺失 / 异常：token 收益恒为 BTC 的 1.5 倍 → β=1.5、α≈0；
-    对齐样本不足 / BTC 无离散 → None。"""
+    对齐样本 <30 / BTC 无离散 → None（7d 窗口已退役）。"""
     btc, tok = [100.0], [50.0]
     for i in range(1, 40):
         btc.append(btc[-1] * (1.01 if i % 2 else 0.995))
@@ -465,21 +541,22 @@ def test_beta_alpha() -> None:
         {"open_time": i * 86_400_000, "close_price": c} for i, c in enumerate(cs)
     ]
     b = sig.beta_alpha(kl(tok), kl(btc))["value"]
-    assert b["beta_7d"] == pytest.approx(1.5, abs=0.01)
+    assert set(b) == {"beta_30d", "alpha_30d"}  # 7d 版本退役
     assert b["beta_30d"] == pytest.approx(1.5, abs=0.01)
-    assert b["alpha_7d"] == pytest.approx(0.0, abs=1e-3)
     assert b["alpha_30d"] == pytest.approx(0.0, abs=1e-3)
     # 缺失
-    assert sig.beta_alpha(None, None)["value"] == {
-        "beta_7d": None,
-        "beta_30d": None,
-        "alpha_7d": None,
-        "alpha_30d": None,
-    }
-    assert sig.beta_alpha([], kl(btc))["value"]["beta_7d"] is None
+    assert sig.beta_alpha(None, None)["value"] == {"beta_30d": None, "alpha_30d": None}
+    assert sig.beta_alpha([], kl(btc))["value"]["beta_30d"] is None
+    # 对齐样本不足最小门槛 → None（不给 n=7 的伪精度估值机会）
+    short = 20
+    assert (
+        sig.beta_alpha(kl(tok[:short]), kl(btc[:short]))["value"]["beta_30d"] is None
+    )
+    # 31 根收盘 = 30 个日收益点，正好过门槛（N 根收盘只给 N-1 个收益）
+    assert sig.beta_alpha(kl(tok[:31]), kl(btc[:31]))["value"]["beta_30d"] is not None
     # 异常：BTC 无离散（常数序列）→ 除零 → None
     flat_btc = [{"open_time": i * 86_400_000, "close_price": 100.0} for i in range(40)]
-    assert sig.beta_alpha(kl(tok), flat_btc)["value"]["beta_7d"] is None
+    assert sig.beta_alpha(kl(tok), flat_btc)["value"]["beta_30d"] is None
 
 
 def test_turnover() -> None:
@@ -496,7 +573,7 @@ def test_market_metrics() -> None:
     """直读 mkt 派生字段 + 换手率（quote_volume/mcap）；输入缺失 → 全 None。"""
     v = sig.market_metrics(_fund(), _mkt())["value"]
     assert v["rv_7d"] == 40.0
-    assert v["beta_7d"] == 1.1
+    assert v["beta_30d"] == 1.05
     assert v["alpha_30d"] == 0.002
     assert v["turnover"] == pytest.approx(1e9 / 500.0)
     assert sig.market_metrics(None, None)["value"] == {
@@ -505,9 +582,7 @@ def test_market_metrics() -> None:
         "drawdown_1y": None,
         "vol_adj_ret_7d": None,
         "vol_adj_ret_30d": None,
-        "beta_7d": None,
         "beta_30d": None,
-        "alpha_7d": None,
         "alpha_30d": None,
         "turnover": None,
     }

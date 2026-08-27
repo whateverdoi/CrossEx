@@ -37,8 +37,10 @@ def test_fetch_protocol_tvl_mock() -> None:
         "tvl_change_30d",
         "mcap",
         "fdv",
+        "category",
     }
     assert isinstance(row["tvl"], float)
+    assert row["category"] == "DEX"  # 与 TOKEN_SLUG_MAP 的 uniswap 口径一致
 
 
 def test_fetch_protocol_tvl_parses(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -75,6 +77,7 @@ def test_fetch_protocol_tvl_missing_fields_none(
         "tvl_change_30d": None,
         "mcap": None,
         "fdv": None,
+        "category": None,
     }
 
 

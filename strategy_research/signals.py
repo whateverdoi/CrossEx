@@ -5,8 +5,10 @@
 - ``divergence``：价格 vs 基本面背离 + 四象限推导
 - ``sentiment_raw``：持仓指标原始值直读（无阈值打分，LLM 按 prompt 解读）
 - ``series_change`` / ``series_trend``：历史序列确定性趋势特征（01 票）
-- ``funding_cross_sectional_z``：资金费率横截面 Z（08 票，第一层派生）
-- ``volatility_metrics`` / ``beta_alpha``：波动率家族 / β·α 分解（klines 纯算）
+- ``funding_cross_sectional_pctile``：资金费率全市场横截面分位（08 票第一层派生；
+  原 4 主币 z 分因参照系 σ 近 0 放大噪声而退役）
+- ``volatility_metrics`` / ``beta_alpha``：波动率家族 / β·α 分解（klines 纯算；
+  β/α 仅 30d 窗口，7d 因 n=7 无统计意义退役）
 - ``turnover`` / ``market_metrics``：换手率与市场派生指标汇总
 - ``market_width``：全市场宽度聚合（涨跌家数比 / 中位数 / BTC 尾窗收益）
 - ``social_heat_trend`` / ``social_price_divergence``：社交热度趋势与社交/价格背离
@@ -208,34 +210,28 @@ def series_trend(rows: list[dict] | None, key: str, days: int) -> str | None:
 # ── 第一层派生（08 票：零成本派生数据维度） ────────────────
 
 
-#: funding_z 横截面参照系（固定 4 主币，抗候选池漂移）
-_FUNDING_Z_UNIVERSE = ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT")
+#: 横截面分位最小有效样本（全市场 premiumIndex 约数百合约，20 为兜底门槛）
+_FUNDING_X_MIN_SAMPLES = 20
 
 
-def funding_cross_sectional_z(rates: dict | None, symbol: str) -> float | None:
-    """资金费率横截面 Z：目标币相对主币参照系的离差（σ 单位）。
+def funding_cross_sectional_pctile(rates: dict | None, symbol: str) -> float | None:
+    """资金费率横截面分位：目标币费率在全市场合约分布中的有符号百分位（0-100）。
 
-    参照系固定 4 主币（不受批次候选池变化影响，跨运行可比）；z>0 = 费率
-    高于主流（多头更拥挤），z<0 = 费率低于主流（空头更拥挤）。
-    参照系有效样本 <2 / 目标缺失或非数值 → None；参照系无离散（std=0）
-    → 0.0（无横截面离差信息，不猜方向）。
+    替代 4 主币 z 分——主币费率彼此几乎相等 → σ 近 0 → 离差被放大成 +8σ/−28σ
+    这类无意义值。分位口径与 funding_pctile_90d 一致，跨运行可比。
+    高分位 = 多头付费远高于全市场（多头拥挤，反向）；低分位 = 空头付费主导
+    （空头拥挤）。有效样本 <_FUNDING_X_MIN_SAMPLES / 目标缺失或非数值 → None；
+    分布退化（全市场费率相同）→ 50.0（无横截面离差信息，不猜方向）。
     """
     if not rates:
         return None
-    xs = [
-        rates[s]
-        for s in _FUNDING_Z_UNIVERSE
-        if isinstance(rates.get(s), (int, float))
-    ]
+    xs = [v for v in rates.values() if isinstance(v, (int, float))]
     x = rates.get(symbol)
-    if not isinstance(x, (int, float)) or len(xs) < 2:
+    if not isinstance(x, (int, float)) or len(xs) < _FUNDING_X_MIN_SAMPLES:
         return None
-    mean = sum(xs) / len(xs)
-    var = sum((v - mean) ** 2 for v in xs) / len(xs)
-    std = var**0.5
-    if std == 0:
-        return 0.0
-    return (x - mean) / std
+    if max(xs) == min(xs):
+        return 50.0
+    return round(sum(1 for v in xs if v <= x) / len(xs) * 100.0, 1)
 
 
 def _daily_returns(klines: list[dict] | None, days: int) -> list[float] | None:
@@ -326,29 +322,33 @@ def _aligned_returns(
     return pairs[-days:]
 
 
+#: β/α 回看窗口 = 最小对齐样本数（二者同值，避免「窗口 30d 但只有 7 个点」的
+#: 伪精度）：7 个日收益点估出的 β 是噪声（实测同一币 7d=2.29 与 30d=−0.65
+#: 并存，两分支各取一端当论据），故 7d 窗口退役
+_BETA_MIN_SAMPLES = 30
+
+
 def beta_alpha(
     token_klines: list[dict] | None, btc_klines: list[dict] | None
 ) -> dict:
-    """β·α 分解（相对 BTC）：β = cov(r_t, r_b)/var(r_b)；α = mean(r_t) − β×mean(r_b)。
+    """β·α 分解（相对 BTC，30d 窗口）：β = cov(r_t, r_b)/var(r_b)；
+    α = mean(r_t) − β×mean(r_b)（日超额收益，正 = 相对 BTC 跑赢）。
 
-    7d/30d 双窗口；α 为日超额收益（小数，正 = 相对 BTC 跑赢）；
-    对齐样本不足 / BTC 无离散（var=0，除零）→ 对应字段 None（UNKNOWN 纪律）。
+    7d 窗口退役：n=7 的 β 估计无统计意义。对齐样本 <_BETA_MIN_SAMPLES /
+    BTC 无离散（var=0，除零）→ 字段 None（UNKNOWN 纪律）。
     """
-    out = {"beta_7d": None, "beta_30d": None, "alpha_7d": None, "alpha_30d": None}
-    for days, b_key, a_key in ((7, "beta_7d", "alpha_7d"), (30, "beta_30d", "alpha_30d")):
-        pairs = _aligned_returns(token_klines, btc_klines, days)
-        if not pairs:
-            continue
+    out = {"beta_30d": None, "alpha_30d": None}
+    pairs = _aligned_returns(token_klines, btc_klines, _BETA_MIN_SAMPLES)
+    if pairs:
         n = len(pairs)
         t_mean = sum(p[0] for p in pairs) / n
         b_mean = sum(p[1] for p in pairs) / n
         cov = sum((p[0] - t_mean) * (p[1] - b_mean) for p in pairs) / n
         var_b = sum((p[1] - b_mean) ** 2 for p in pairs) / n
-        if var_b == 0:
-            continue
-        beta = cov / var_b
-        out[b_key] = round(beta, 4)
-        out[a_key] = round(t_mean - beta * b_mean, 6)
+        if var_b != 0:
+            beta = cov / var_b
+            out["beta_30d"] = round(beta, 4)
+            out["alpha_30d"] = round(t_mean - beta * b_mean, 6)
     return {"value": out}
 
 
@@ -378,9 +378,7 @@ def market_metrics(fund: dict | None, mkt: dict | None) -> dict:
             "drawdown_1y",
             "vol_adj_ret_7d",
             "vol_adj_ret_30d",
-            "beta_7d",
             "beta_30d",
-            "alpha_7d",
             "alpha_30d",
         )
     }
@@ -440,18 +438,25 @@ def market_width(fapi_tickers: dict | None, btc_klines: list[dict] | None) -> di
 #: 多空爆仓失衡阈值：ratio >= 1.2 多头爆仓主导（下行压力）；<= 1/1.2 空头主导
 _LIQ_IMBALANCE_THRESHOLD = 1.2
 
+#: 爆仓失衡最小名义额门槛（USDT，24h 多空爆仓合计）：低于此额的 ratio 由尘埃
+#: 爆仓构成，标签无信息量（实测几十美元级爆仓也能打出 long_heavy）
+_LIQ_IMBALANCE_MIN_TOTAL_USD = 10_000.0
+
 
 def liquidation_imbalance(long_liq: Any, short_liq: Any) -> dict | None:
     """多空爆仓失衡（24h 聚合额）：ratio = 多头爆仓额 / 空头爆仓额。
 
     ratio 高 = 多头被迫平仓主导（下行压力）；低 = 空头被爆主导（回补反弹
-    压力）；任一缺失 → None；双方均无爆仓 → None（零爆仓无信息不猜方向）；
+    压力）；任一缺失 → None；双方合计 <_LIQ_IMBALANCE_MIN_TOTAL_USD → None
+    （尘埃爆仓不出标签）；双方均无爆仓 → None（零爆仓无信息不猜方向）；
     仅多头有爆仓（空头为零）→ ratio=None + long_heavy（避免 inf 序列化）。
     """
     long_liq, short_liq = _num(long_liq), _num(short_liq)
     if long_liq is None or short_liq is None:
         return None
     if long_liq <= 0 and short_liq <= 0:
+        return None
+    if long_liq + short_liq < _LIQ_IMBALANCE_MIN_TOTAL_USD:
         return None
     ratio = long_liq / short_liq if short_liq > 0 else None
     if ratio is None or ratio >= _LIQ_IMBALANCE_THRESHOLD:
@@ -461,6 +466,87 @@ def liquidation_imbalance(long_liq: Any, short_liq: Any) -> dict | None:
     else:
         label, note = "balanced", "多空爆仓额接近（强平压力均衡）"
     return {"ratio": ratio, "label": label, "note": note}
+
+
+# ── 交易结构（可执行性维度：证据表此前完全不涉及能不能成交、代价多少） ──
+
+
+def funding_interval_hours(rows: list[dict] | None) -> float | None:
+    """结算间隔（小时）：费率历史相邻时间戳差值的中位数。
+
+    不能一律按 8h——部分合约 4h/1h 结算，按 8h 算持仓成本会低估 2~8 倍。
+    样本 <2 / 时间戳非法 → None（UNKNOWN 纪律）。
+    """
+    ts = sorted(
+        r.get("funding_time")
+        for r in rows or []
+        if isinstance(r.get("funding_time"), (int, float))
+    )
+    diffs = [b - a for a, b in pairwise(ts) if b > a]
+    if len(diffs) < 2:
+        return None
+    median_ms = sorted(diffs)[len(diffs) // 2]
+    hours = median_ms / 3_600_000.0
+    return round(hours, 2) if hours > 0 else None
+
+
+def funding_carry_pct(
+    funding: Any, interval_hours: Any, days: int
+) -> float | None:
+    """按当前费率持有 N 天的资金费成本（%，正 = 多头支付、负 = 空头支付）。
+
+    = funding × (24 / 结算间隔) × days × 100；与价格涨跌同尺度，可直接
+    判断「一个 -30% 的做空论证是否被持仓成本吃掉」。任一输入缺失/非法
+    或间隔 ≤0 或 days ≤0 → None（UNKNOWN 纪律）。
+    """
+    f, h = _num(funding), _num(interval_hours)
+    if f is None or h is None or h <= 0 or days <= 0:
+        return None
+    return round(f * (24.0 / h) * days * 100.0, 4)
+
+
+#: 盘口深度带：最优价向两侧各 2% 以内的累计名义额
+_DEPTH_BAND_PCT = 2.0
+
+
+def book_structure(book: dict | None, band_pct: float = _DEPTH_BAND_PCT) -> dict:
+    """盘口 → 交易结构：点差 % + 中价两侧 band_pct% 带内可成交名义额（USDT）。
+
+    spread_pct = (最优卖 - 最优买) / 中价 × 100（市价单立即付出的成本）；
+    bid/ask_depth_usd = 带内各档 price×qty 累计——决定能不能上量；
+    档位不足覆盖整带时该深度只是**下限**，用 ``*_exhausted`` 标记（不把
+    下限当实测值呈现，UNKNOWN 纪律的延伸）。
+    任一侧盘口为空 → 对应字段 None；盘口整体缺失 → 全 None。
+    """
+    out = {
+        "spread_pct": None,
+        "bid_depth_usd": None,
+        "ask_depth_usd": None,
+        "depth_band_exhausted": None,
+    }
+    bids = (book or {}).get("bids") or []
+    asks = (book or {}).get("asks") or []
+    if not bids or not asks:
+        return out
+    best_bid, best_ask = bids[0][0], asks[0][0]
+    mid = (best_bid + best_ask) / 2.0
+    if mid <= 0:
+        return out
+    out["spread_pct"] = round((best_ask - best_bid) / mid * 100.0, 4)
+    lo, hi = mid * (1.0 - band_pct / 100.0), mid * (1.0 + band_pct / 100.0)
+
+    def _side(levels: list, within) -> tuple[float | None, bool]:
+        rows = [lv for lv in levels if within(lv[0])]
+        total = sum(lv[0] * lv[1] for lv in rows if isinstance(lv[1], (int, float)))
+        # 末档仍在带内 = 档位被带截断，累计值只是下限
+        return round(total, 2), bool(levels and within(levels[-1][0]))
+
+    bid_total, bid_ex = _side(bids, lambda p: lo <= p <= mid)
+    ask_total, ask_ex = _side(asks, lambda p: mid <= p <= hi)
+    out["bid_depth_usd"] = bid_total
+    out["ask_depth_usd"] = ask_total
+    out["depth_band_exhausted"] = bid_ex or ask_ex
+    return out
 
 
 def oi_price_divergence(
@@ -484,31 +570,58 @@ def oi_price_divergence(
     return {"label": "weak_short", "note": "价跌 OI 缩：存量平仓驱动，趋势健康度弱"}
 
 
+def _heat_split(posts: list[dict]) -> tuple[list[dict], list[dict]] | None:
+    """样本分档 → (近期侧, 更早侧)；不足最小样本 → None（两函数共用，档名不漂移）。
+
+    门槛取小样本兼容：未登录 x.com profile 页仅渲染约 5-7 条推文（登录墙截断），
+    ≥7 条走 5 vs 其余，恰好 6 条退化为 3 vs 3，<6 条不派生（UNKNOWN 纪律）。
+    """
+    n = len(posts)
+    if n >= 7:
+        return posts[-5:], posts[:-5]
+    if n == 6:
+        return posts[-3:], posts[:3]
+    return None
+
+
+def social_heat_window(posts: list[dict] | None) -> str | None:
+    """热度读数的样本档名（档名即算式，两档之间不可互相比较）。
+
+    ``recent5_vs_prior_median`` / ``recent3_vs_prior3_median``；样本不足 → None。
+    与 ``social_heat_trend`` 同源分档，供摘要与快照标注该数值是哪种算式产出的。
+    """
+    split = _heat_split(posts or [])
+    if split is None:
+        return None
+    return "recent5_vs_prior_median" if len(split[0]) == 5 else "recent3_vs_prior3_median"
+
+
 def social_heat_trend(posts: list[dict] | None) -> float | None:
-    """社交热度变化：最近 5 条均值 vs 其余中位数的互动强度比 - 1（%）。
+    """社交热度变化：近期侧均值 vs 更早侧中位数的互动强度比 - 1（%）。
 
     posts 为 X 互动序列（时间升序，最新在末尾），每条含 likes/reposts/comments
     原样文本（如 "14" / "120"）；互动强度 = likes + reposts + comments（views
-    是触达非互动，不计）；中位数抗单条爆款脉冲；样本 <7 条（其余侧 <2）或任一侧
-    无有效数值 → None（UNKNOWN 纪律）。门槛取小样本兼容：未登录 x.com profile
-    页仅渲染约 5-7 条推文（登录墙截断），≥7 条即可算最近 5 条 vs 其余 2 条中位数。
+    是触达非互动，不计）；中位数抗单条爆款脉冲；样本分档见 ``_heat_split``，
+    不足档或任一侧无有效数值 → None（UNKNOWN 纪律）。
     """
     from .datasources.x_social import parse_compact_number  # 延迟导入避免循环
 
-    if not posts or len(posts) < 7:
+    split = _heat_split(posts or [])
+    if split is None:
         return None
+    recent_posts, prior_posts = split
 
     def _eng_sum(p: dict) -> float:
         vals = [parse_compact_number(p.get(k)) for k in ("likes", "reposts", "comments")]
         vals = [v for v in vals if v is not None]
         return sum(vals) if vals else 0.0
 
-    recent = [v for v in (_eng_sum(p) for p in posts[-5:]) if v > 0]
-    prior = [v for v in (_eng_sum(p) for p in posts[:-5]) if v > 0]
+    recent = [v for v in (_eng_sum(p) for p in recent_posts) if v > 0]
+    prior = [v for v in (_eng_sum(p) for p in prior_posts) if v > 0]
     if not recent or not prior:
         return None
     recent_avg = sum(recent) / len(recent)
-    prior_med = sorted(prior)[len(prior) // 2]  # 中位数
+    prior_med = sorted(prior)[len(prior) // 2]  # 中位数（偶数侧取偏上位，不取均值）
     if prior_med <= 0:
         return None
     return round((recent_avg / prior_med - 1.0) * 100.0, 1)
@@ -550,10 +663,10 @@ def sentiment_raw(mkt: dict | None, ms: dict | None = None, soc: dict | None = N
             "ls_ratio_all": _v(ms, "ls_ratio_all"),
             "ls_ratio_top_acc": _v(ms, "ls_ratio_top_acc"),
             "ls_ratio_top_pos": _v(ms, "ls_ratio_top_pos"),
-            "taker_bs_ratio": _v(ms, "taker_bs_ratio"),
+            "taker_bs_ratio_1h": _v(ms, "taker_bs_ratio_1h"),
             "oi_change_24h": _v(ms, "oi_change_24h"),
             "oi_price_divergence": _v(ms, "oi_price_divergence"),
-            "funding_z": _v(mkt, "funding_z"),
+            "funding_x_pctile": _v(mkt, "funding_x_pctile"),
             "social_heat_trend": _v(soc, "social_heat_trend"),
             "social_price_divergence": _v(soc, "social_price_divergence"),
         },

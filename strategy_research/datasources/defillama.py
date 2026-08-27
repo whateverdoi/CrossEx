@@ -1,6 +1,7 @@
 """defillama 数据源（httpx sync，零 key）。
 
-- ``fetch_protocol_tvl``：/protocol/{id} 协议 TVL（当前值 + 7d 变化 + mcap/fdv）
+- ``fetch_protocol_tvl``：/protocol/{id} 协议 TVL（当前值 + 7d 变化 + mcap/fdv + 板块）
+- ``fetch_protocol_categories``：/lite/protocols2 全市场 symbol → 板块索引（候选层用）
 - ``fetch_protocol_fees``：/summary/fees/{id} 协议费用与收入
 - ``fetch_stablecoin_supply``：stablecoins.llama.fi 链稳定币总量（最新日求和）
 - ``fetch_dex_volume_24h``：/overview/dexs 链 DEX 交易量（可指定 chain）
@@ -124,7 +125,11 @@ def fetch_protocol_tvl(
     protocol: str, client: httpx.Client | None = None
 ) -> dict | None:
     """协议 TVL：``{tvl, tvl_change_1d, tvl_change_7d, tvl_change_30d,
-    mcap, fdv}``（缺失字段 None）。"""
+    mcap, fdv, category}``（缺失字段 None）。
+
+    ``category`` 是 DeFiLlama 的板块标签（DEX/Lending/…），随详情一起返回，
+    不额外请求——候选层板块多样性约束与摘要板块行都用它。
+    """
     if env.is_mock_mode():
         return mock.mock_protocol_tvl(protocol)
     try:
@@ -133,6 +138,7 @@ def fetch_protocol_tvl(
         return None
     if not isinstance(data, dict):
         return None
+    category = data.get("category")
     return {
         "tvl": _chain_tvl_sum(data),
         "tvl_change_1d": _change_from_history(data.get("tvl"), 1),
@@ -140,6 +146,7 @@ def fetch_protocol_tvl(
         "tvl_change_30d": _change_from_history(data.get("tvl"), 30),
         "mcap": _float_or_none(data.get("mcap")),
         "fdv": _float_or_none(data.get("fdv")),
+        "category": category if isinstance(category, str) and category else None,
     }
 
 
@@ -345,6 +352,42 @@ def fetch_protocols(client: httpx.Client | None = None) -> dict[str, str] | None
         slug = p.get("slug")
         if symbol and slug and symbol not in out:
             out[symbol] = slug
+    return out
+
+
+#: ``fetch_protocol_categories`` 响应体积约 6.7MB（较 /protocols 小两成）
+LITE_PROTOCOLS_URL = f"{BASE_URL}/lite/protocols2"
+
+
+def fetch_protocol_categories(
+    client: httpx.Client | None = None,
+) -> dict[str, str] | None:
+    """全市场板块索引（/lite/protocols2，一次请求）：``{SYMBOL: category}``。
+
+    候选层板块多样性约束的唯一批量分类来源；同 symbol 多协议取首见（响应按
+    TVL 降序，与 :func:`fetch_protocols` 同纪律）。symbol 缺失或为 ``-``
+    （WBTC 等无代币协议）与非法 category 一律跳过——UNKNOWN 不入任何板块桶。
+    失败返回 ``None``：调用方跳过约束并在工件留痕，不中断批（辅助索引，
+    与筛选快照的「失败即批终止」不同级）。
+    """
+    if env.is_mock_mode():
+        return mock.mock_protocol_categories()
+    try:
+        data = _fetch_json(LITE_PROTOCOLS_URL, client=client)
+    except Exception:
+        return None
+    rows = data.get("protocols") if isinstance(data, dict) else None
+    if not isinstance(rows, list):
+        return None
+    out: dict[str, str] = {}
+    for p in rows:
+        if not isinstance(p, dict):
+            continue
+        symbol = str(p.get("symbol") or "").strip().upper()
+        category = p.get("category")
+        if not symbol or symbol == "-" or not isinstance(category, str) or not category:
+            continue
+        out.setdefault(symbol, category)
     return out
 
 
