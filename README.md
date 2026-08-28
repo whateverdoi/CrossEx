@@ -30,9 +30,8 @@ SR_MOCK=1 python -m strategy_research.main
 | `SR_MOCK` | 可选 | `1` = 全离线 mock 模式（零外部请求） |
 | `SR_TOKENS` | 可选 | 手动指定币种（逗号分隔），与 `--tokens` 互斥 |
 | `DEEPSEEK_MODEL` | 可选 | 默认 `deepseek-chat`，可换 `deepseek-reasoner` 等 |
-| `SR_SCAN_AUTO` | 可选 | `0` = 关闭扫描器快照陈旧自动补跑（默认开） |
-| `SR_SCAN_DIR` | 可选 | 扫描器快照目录覆盖（默认 `~/Projects/python_projects/BinanceApi/data/research`） |
-| `SR_SCAN_DATE` | 可选 | 强制指定快照日期（默认取目录内最新） |
+| `SR_MOCK_REPORT` | 可选 | mock 模式默认不落盘；`1` = 落盘到 `reports/mock/<ts>/`（不触碰 `latest/`） |
+| `SR_KEEP_REPORTS` | 可选 | live 报告保留份数，默认 `30`；`0` = 不清理（`reports/mock/`、`latest/` 不受影响） |
 
 数据源层（Binance / DefiLlama / OKX / X 公开主页 / 新闻 RSS）零环境变量，无需配置。
 
@@ -101,29 +100,7 @@ python -m ruff check strategy_research/ tests/
 理由）；新增数据抓了不喂，测试先红。mock/live 同构由交叉验证测试钉住（同一批纯函数、
 逐值一致），因此 mock 回归不是玩具路径。
 
-### 7. 扫描器快照（自动补跑，无需手动操作）
-
-报告中的**榜单截面数据**（`boards` 榜单归属、`ret_1h/4h/24h/7d` 多窗口收益、期货溢价、`onboard_date`，以及 CSV 侧的 OI/多空比/taker/funding 趋势历史窗口）来自 BinanceApi 项目的每日扫描器产出 CSV（`data/research/{date}_all/movers/microstructure.csv`），本 agent 只读消费。它与本项目 `datasources/` 直连 Binance/OKX 取得的实时微观结构（OI 变化与背离、多空比、taker 比、爆仓失衡、盘口点差与深度）是**互补两条路**，不互相替代。
-
-**新鲜度由 main 自动保证**：非 mock 模式下，`main` 启动时检查快照日期——若距今天超过 1 天（陈旧），自动以子进程调用 BinanceApi 的 `research/scan.py` 补跑（全市场约 15 分钟），产出当日快照后再继续运行。**你不需要手动跑扫描器**，也不需要任何额外步骤：
-
-```bash
-python -m strategy_research.main   # 陈旧 → 自动补跑 → 用当日快照继续
-```
-
-- 补跑状态写入 `run.json.meta.scanner`（`fresh` / `refreshed` / `failed` / `unavailable`），失败不阻断运行（沿用旧快照 + 留痕）
-- mock 模式不触发补跑（离线纪律）；`SR_SCAN_AUTO=0` 可关闭
-- 快照日期会渲染在 `evidence.md` 每币标题下，可随时核对数据新鲜度
-- **前置条件**：自动补跑要求 BinanceApi 项目存在于默认路径 `~/Projects/python_projects/BinanceApi`。
-  该路径不存在时状态为 `unavailable`（不补跑、不报错），**丢的是 `scanner_snapshot` 这一整节**：
-  榜单归属 `boards`、`ret_1h/4h/24h/7d` 多窗口收益、`futures_premium_pct`、`onboard_date`
-  及 CSV 侧的 OI/多空比/taker/funding 趋势历史窗口——摘要里该节整节不渲染（有 `if` 保护）。
-  本项目自己直连的微观结构照常取值：OI 变化与背离、全市场/大户多空比、taker 比、
-  OKX 爆仓失衡、盘口点差与双边深度、funding 历史分位。
-  核对方式：`run.json.meta.scanner.status` + `evidence.md` 每币标题下的快照日期；
-  项目在其他位置时用 `SR_SCAN_DIR` 指向其 `data/research` 目录。
-
-### 8. 「信号 vs 价格」回看（离线评估器，不进管线）
+### 7. 「信号 vs 价格」回看（离线评估器，不进管线）
 
 系统本身不产方向结论（ADR 0001），但**信号的预测力可以离线描述性地度量**：
 `strategy_research/lookback.py` 只读历史 `reports/*/run.json` 里的信号快照，
@@ -185,7 +162,6 @@ strategy_research/
 ├── nodes.py            # 各节点实现（数据装配/信号/分支/核验/报告）
 ├── signals.py          # 确定性信号纯函数（无 IO，缺失 → None）
 ├── screener.py         # 币种筛选规则引擎（Filter AND → Rank Top N → 板块上限）
-├── scanner_snapshot.py # 扫描器快照读取 + 陈旧自动补跑（子进程）
 ├── schemas.py          # 宽容 JSON 解析器（_extract_json 系列）
 ├── evidence.py         # 证据体系（EvidenceItem + 确定性核验）
 ├── context.py          # 分支 prompt + 摘要构建器 + 情绪解读注记

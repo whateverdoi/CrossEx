@@ -46,10 +46,13 @@ def test_invoke_runs_branch_topology(monkeypatch, tmp_path):
 
 
 def test_state_carries_tokens_and_meta(monkeypatch, tmp_path):
-    """state 基础字段：tokens 原样传入，meta 有 report_path。"""
+    """state 基础字段：tokens 原样传入，meta 带 node_order/llm_calls；
+    mock 默认不落盘 → report_path 为 None。"""
     monkeypatch.chdir(tmp_path)  # 落盘隔离：不写项目 reports/
     env.reset_call_counts()
     app = build_graph()
     result = app.invoke({"tokens": ["BTC"], "meta": {}})
     assert result["tokens"] == ["BTC"]
-    assert result["meta"].get("report_path")
+    assert result["meta"].get("node_order")
+    assert result["meta"]["llm_calls"]["total"] == 2
+    assert result["meta"].get("report_path") is None  # mock 默认不落盘

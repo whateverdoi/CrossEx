@@ -47,17 +47,20 @@ def test_mock_full_chain_report_and_cost_model(monkeypatch, tmp_path):
     成本模型：两分支 × 6 token = 12 次调用；
     avg=2.0/token。工件一致性：candidates 仅候选列表 / 信号快照 diff 首跑全 new
     （旧 decision 型快照退役，04 票改为信号快照对比）。
+    mock 落盘走 SR_MOCK_REPORT=1 → reports/mock/<ts>/（不触碰 latest/）。
     """
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SR_MOCK_REPORT", "1")
     _reset_counts()
     result = build_graph().invoke({"tokens": MOCK_TOKENS, "meta": {}})
     meta = result["meta"]
     assert meta["report_path"]  # 报告目录落盘
     run_dir = Path(meta["report_path"])
+    assert run_dir.parent.name == "mock"  # mock 独立目录
     for f in ("run.json", "evidence.md", "candidates.json"):
         assert (run_dir / f).is_file()
-    assert (_latest() / "snapshot.json").is_file()
-    assert (_latest() / "signal_diff.json").is_file()
+    assert (run_dir / "snapshot.json").is_file()  # 快照归档随目录
+    assert (run_dir / "signal_diff.json").is_file()
     # 成本模型（03 票）：两分支各 6 次 = 12
     assert dict(env._MOCK_CALL_COUNTS) == {"bull": 6, "bear": 6}
     assert meta["llm_calls"]["total"] == 12
@@ -70,14 +73,14 @@ def test_mock_full_chain_report_and_cost_model(monkeypatch, tmp_path):
     assert result["rejected_evidence"] == {}
     # 工件一致性（04 票）：candidates 仅候选列表；信号快照首跑无上一批 → 全 new
     run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
-    diff = json.loads((_latest() / "signal_diff.json").read_text(encoding="utf-8"))
+    diff = json.loads((run_dir / "signal_diff.json").read_text(encoding="utf-8"))
     md = (run_dir / "evidence.md").read_text(encoding="utf-8")
     cand = json.loads((run_dir / "candidates.json").read_text(encoding="utf-8"))
     assert run["meta"]["tokens"] == MOCK_TOKENS
     assert run["meta"]["node_order"][-1] == "write_report"
     assert run["evidence"] and run["rejected_evidence"] == {}  # 证据清单/剔除
     assert run["signals"]  # 信号快照投影
-    assert cand == {"candidates": MOCK_TOKENS}  # 仅候选列表，分级退役
+    assert cand == {"mode": "mock", "candidates": MOCK_TOKENS}  # mode + 候选列表
     assert {d["action"] for d in diff.values()} == {"new"}  # 首跑全 new
     assert "## 总览" in md
     assert "### 做多证据" in md and "### 做空证据" in md
@@ -92,15 +95,16 @@ def _boom(*args, **kwargs):
 
 def test_offline_branch_errors_continue_report(monkeypatch, tmp_path):
     """验收 3（03 票改造）：断网跑分支不中断批——该 token 空清单 + errors 留痕，
-    报告仍生成（旧断网测试随节点退役，05 票清理）。"""
+    报告仍生成（旧断网测试随节点退役，05 票清理）。mock 落盘走 SR_MOCK_REPORT=1。"""
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SR_MOCK_REPORT", "1")
     monkeypatch.setattr(env, "get_llm", _boom)
     _reset_counts()
     result = build_graph().invoke({"tokens": MOCK_TOKENS, "meta": {}})
     # 批完成：全部 token 空清单 + 错误留痕 + 报告可生成
     assert result["meta"]["report_path"]
     assert (Path(result["meta"]["report_path"]) / "evidence.md").is_file()
-    assert (_latest() / "run.json").is_file()
+    assert (Path(result["meta"]["report_path"]) / "run.json").is_file()
     assert "report_error" not in result["meta"]
     for s in MOCK_TOKENS:
         assert result["bull_evidence"][s] == []
@@ -117,6 +121,7 @@ def test_cli_manual_tokens_skip_screening(monkeypatch, tmp_path):
     """验收 6：--tokens 手动模式与筛选互斥（select_tokens 不被调用），
     meta.screening.mode="manual" 落盘 run.json。"""
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SR_MOCK_REPORT", "1")
 
     def _not_called(*a, **k):
         raise AssertionError("手动模式不应调用筛选器")
@@ -137,6 +142,7 @@ def _not_called(*a, **k):
 def test_cli_sr_tokens_env_manual_mode(monkeypatch, tmp_path):
     """验收 6：SR_TOKENS 环境变量与 --tokens 同语义（手动优先，跳过筛选）。"""
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SR_MOCK_REPORT", "1")
     monkeypatch.setenv("SR_TOKENS", "SOL,XRP")
     monkeypatch.setattr("strategy_research.main.select_tokens", _not_called)
     meta = cli_main([])
@@ -148,6 +154,7 @@ def test_cli_sr_tokens_env_manual_mode(monkeypatch, tmp_path):
 def test_cli_auto_screening_mock_lands_meta(monkeypatch, tmp_path):
     """验收 4（mock 等价）：自动筛选端到端——候选即 tokens、规则落盘 run.json。"""
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SR_MOCK_REPORT", "1")
     meta = cli_main([])
     assert meta["screening"]["mode"] == "mock"  # mock 分支 mode（真实模式为 auto）
     assert meta["screening"]["rules"]  # 规则描述落盘
@@ -172,13 +179,14 @@ def test_screening_failure_terminates_batch_at_entry(monkeypatch, tmp_path):
 
 
 def test_graph_internal_failures_never_escape(monkeypatch, tmp_path):
-    """验收 5 对照：图内节点异常不冒泡出 invoke（ScreeningError 是唯一终止点）。"""
+    """验收 5 对照：图内节点异常不冒泡出 invoke（ScreeningError 是唯一终止点）。
+    mock 默认不落盘：批完成 + 无 report_error 即可（report_path=None 为新契约）。"""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(env, "get_llm", _boom)
     _reset_counts()
     result = build_graph().invoke({"tokens": MOCK_TOKENS, "meta": {}})
-    assert result["meta"]["report_path"]  # 全链路断网仍完成批 + 报告
-    assert "report_error" not in result["meta"]
+    assert result["meta"].get("report_path") is None  # mock 默认不落盘
+    assert "report_error" not in result["meta"]  # 全链路断网仍完成批
 
 
 # ── 真实 API 冒烟（SR_SMOKE=1 显式开启，走真实网络）──────

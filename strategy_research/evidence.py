@@ -19,7 +19,7 @@ from typing import Any
 from pydantic import BaseModel, Field, model_validator
 
 #: basis.domain 白名单（核验解引用根；未知域在核验层剔除，schema 层不设
-#: 枚举——宽容解析 + 核验兜底。scanner_snapshot 特例：field 自带完整路径）
+#: 枚举——宽容解析 + 核验兜底）
 _DOMAIN_KEYS = (
     "signals",
     "market_data",
@@ -259,9 +259,7 @@ def _verify_item(
     domain = _text(basis.get("domain"))
     field = _text(basis.get("field"))
     expected = _text(basis.get("value"))
-    if domain == "scanner_snapshot":  # field 自带完整路径（market.BTC.price）
-        root: Any = state.get("scanner_snapshot") or {}
-    elif domain == "market_env":  # 全市场聚合（meta 级，非 per-token）
+    if domain == "market_env":  # 全市场聚合（meta 级，非 per-token）
         root = (state.get("meta") or {}).get("market_env") or {}
     elif domain in _DOMAIN_KEYS:
         root = (state.get(domain) or {}).get(symbol) or {}
@@ -370,3 +368,27 @@ def verify_evidence(
         if bull_rej or bear_rej:
             rejected[symbol] = bull_rej + bear_rej
     return verified, rejected
+
+
+def dedup_evidence(items: list[dict]) -> list[dict]:
+    """分支证据去重（机器兜底，纯函数）：同 basis 三元组保留第一条；
+    再按去空白归一化 claim 精确去重。
+
+    prompt 第 8/9 条约束 LLM 不重复（basis 三元组互不相同、上限 15 条），但
+    截断恢复/表述改写仍可能撞车：(domain, field, value) 相同 = 同一数据点只留
+    首条；claim 去空白后相同 = 同一主张的改写只留首条。顺序保持 LLM 输出序
+    （按重要性降序，去重不重排）。
+    """
+    seen_basis: set[tuple] = set()
+    seen_claim: set[str] = set()
+    out: list[dict] = []
+    for item in items:
+        b = item.get("basis") or {}
+        basis_key = (b.get("domain"), b.get("field"), b.get("value"))
+        claim_key = "".join((item.get("claim") or "").split())
+        if basis_key in seen_basis or claim_key in seen_claim:
+            continue
+        seen_basis.add(basis_key)
+        seen_claim.add(claim_key)
+        out.append(item)
+    return out

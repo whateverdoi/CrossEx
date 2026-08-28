@@ -14,7 +14,6 @@ from typing import Any
 
 from strategy_research import context, env
 from strategy_research import evidence as ev_mod
-from strategy_research import scanner_snapshot as scan_mod
 from strategy_research import signals as sig_mod
 from strategy_research.datasources import (
     binance,
@@ -659,7 +658,8 @@ def collect_data(state: dict) -> dict:
     """① 数据收集（确定性）：共享批内一次 + 并发 per-token 装配 + X 抓取串行。
 
     失败即失败：数据源失败该数据点 UNKNOWN 并标记 error/incomplete，
-    单 token 异常不中断批；incomplete_tokens 落 meta。
+    单 token 异常不中断批；incomplete_detail 落 meta（token → 缺失域名清单，
+    incomplete_tokens 保留兼容）。
     X 抓取（social_data）放线程池外串行——每币约 30-60 秒且需有头浏览器
     （DISPLAY），多 Chromium 并发易被 x.com 风控/内存压力。
     """
@@ -667,14 +667,6 @@ def collect_data(state: dict) -> dict:
     order.append("collect_data")
     meta["node_order"] = order
     tokens = state["tokens"]
-    # 扫描器快照（外部 BinanceApi CSV，只读；异常/缺失 → {}，分支摘要与④ 报告占位；
-    # 已注入的 state 快照优先，测试注入/外部提供不经文件读取）
-    scanner_snapshot: dict = dict(state.get("scanner_snapshot") or {})
-    if not scanner_snapshot:
-        try:
-            scanner_snapshot = scan_mod.load_snapshots()
-        except Exception as exc:  # 同 report_error 纪律：仅记录不中断批
-            meta["scan_error"] = f"扫描器快照读取失败: {exc}"
     shared = _load_shared(tokens)
     meta["market_env"] = sig_mod.market_width(
         shared.get("fapi_tickers"), shared.get("btc_klines")
@@ -684,7 +676,7 @@ def collect_data(state: dict) -> dict:
     microstructure_data: dict[str, dict] = {}
     web_data: dict[str, dict] = {}
     social_data: dict[str, dict] = {}
-    incomplete: list[str] = []
+    incomplete_detail: dict[str, list[str]] = {}
     with ThreadPoolExecutor(max_workers=4) as pool:
         futures = {s: pool.submit(_one, s, shared) for s in tokens}
         for symbol, fut in futures.items():
@@ -702,23 +694,32 @@ def collect_data(state: dict) -> dict:
                 or ms.get("incomplete")
                 or web_snap.get("incomplete")
             ):
-                incomplete.append(symbol)
+                incomplete_detail[symbol] = [
+                    d
+                    for d, snap in (
+                        ("fund", fund),
+                        ("mkt", mkt),
+                        ("ms", ms),
+                        ("web", web_snap),
+                    )
+                    if snap.get("incomplete")
+                ]
     # X 抓取串行（有头浏览器，每币约 30-60 秒；失败降级 UNKNOWN 不阻断）
     for symbol in tokens:
         try:
             social_data[symbol] = _social(symbol, market_data.get(symbol) or {})
         except Exception as exc:  # 终极兜底
             social_data[symbol] = _error_snapshots(symbol, exc)[4]
-        if social_data[symbol].get("incomplete") and symbol not in incomplete:
-            incomplete.append(symbol)
-    meta["incomplete_tokens"] = incomplete
+        if social_data[symbol].get("incomplete"):
+            incomplete_detail.setdefault(symbol, []).append("social")
+    meta["incomplete_detail"] = incomplete_detail
+    meta["incomplete_tokens"] = list(incomplete_detail)  # 兼容字段（token 清单）
     return {
         "market_data": market_data,
         "fundamental_data": fundamental_data,
         "microstructure_data": microstructure_data,
         "web_data": web_data,
         "social_data": social_data,
-        "scanner_snapshot": scanner_snapshot,
         "meta": meta,
     }
 
@@ -889,9 +890,10 @@ def _invoke_branch(
 ) -> tuple[list[dict], str | None]:
     """分支单 token 证据提取（02 票）：json_mode 单次调用 + 宽容解析。
 
-    坏条目（claim/source 空）丢弃在装配层；数量不设上限（每条须独立有据，
-    核验层去重兜底）；异常 → ([], 错误消息)，批不中断。重试 2 次（共 3 次
-    尝试）——LLM 偶发失败（限流/网络抖动）不应直接产出 0 证据。返回 (items, error)。
+    坏条目（claim/source 空）丢弃在装配层；prompt 约束条数上限 15、basis 三元组
+    互不相同（核验前机器去重兜底）；异常 → ([], 错误消息)，批不中断。重试 2 次
+    （共 3 次尝试）——LLM 偶发失败（限流/网络抖动）不应直接产出 0 证据。
+    返回 (items, error)。
     """
     prompt = context.BULL_PROMPT if side == "bull" else context.BEAR_PROMPT
     items: list[dict] = []
@@ -938,7 +940,7 @@ def _branch(state: dict, side: str) -> dict:
     items: dict[str, list[dict]] = {}
     for s in state["tokens"]:
         got, err = _invoke_branch(s, state, side)
-        items[s] = got
+        items[s] = ev_mod.dedup_evidence(got)  # 同 basis 三元组/同 claim 改写去重
         if err:
             errors[s] = err
         elif not got:  # 成功但空证据：留痕可诊断（区分失败与合法空）
@@ -950,7 +952,7 @@ def _branch(state: dict, side: str) -> dict:
 
 
 def bull_research(state: dict) -> dict:
-    """多头证据研究员（02 票）：单 token 结构化证据（数量不设上限，逐条机器核验）。"""
+    """多头证据研究员（02 票）：单 token 结构化证据（上限 15 条，逐条机器核验）。"""
     return _branch(state, "bull")
 
 
@@ -984,7 +986,8 @@ def write_report(state: dict) -> dict:
     meta["node_order"] = order
     try:
         report_path, artifacts = build_report(state, meta)
-        meta["report_path"] = str(report_path)
+        # mock 默认不落盘（SR_MOCK_REPORT=1 才写）→ report_path 为 None
+        meta["report_path"] = str(report_path) if report_path else None
     except Exception as exc:  # 规格：落盘异常仅记 meta，不中断批（六节错误矩阵 ④）
         artifacts = {s: {} for s in state["tokens"]}
         meta["report_error"] = f"报告落盘失败: {exc}"

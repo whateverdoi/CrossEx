@@ -46,7 +46,7 @@ flowchart TD
 
     SCR -->|"tokens<br/>meta.screening"| START
     START -->|"tokens"| CD
-    CD -->|"market_data<br/>fundamental_data<br/>microstructure_data<br/>web_data<br/>social_data<br/>scanner_snapshot, meta"| CS
+    CD -->|"market_data<br/>fundamental_data<br/>microstructure_data<br/>web_data<br/>social_data, meta"| CS
     CS -->|"signals（含 sentiment）"| BR
     CS -->|"signals（含 sentiment）"| BA
     BR -->|"bull_evidence"| EV
@@ -74,9 +74,8 @@ flowchart TD
 | **`microstructure_data`** | 确定性层 | ① | ② 分支 ④ | `dict[symbol, {oi_change_24h, oi_change_48h, oi_value_change_24h, ls_ratio_all, ls_ratio_all_change_24h, ls_ratio_top_acc, ls_ratio_top_pos, taker_bs_ratio_1h, liq_long_24h, liq_short_24h, liq_total_24h, liq_total_oi_ratio, liq_imbalance:{ratio,label,note}, oi_price_divergence:{label,note}, error, incomplete}]`（爆仓键 source=okx，其余 binance_futures） |
 | `web_data` | 确定性层 + 新闻/催化剂 | ① | 分支 ④ | `dict[symbol, {symbol, items: list[{date,title,source}] \| None, web_error, incomplete}]` |
 | **`social_data`** | 确定性层（X 有头浏览器抓取） | ① | 分支 ④ | `dict[symbol, {symbol, follower_count, posts: list[{likes,reposts,comments,views,time}] \| None, post_frequency, social_heat_trend, social_heat_window, social_price_divergence:{label,note}, error, incomplete}]`：互动数为**页面原样文本**（`"16.3万"`/`"14"`）不做归一化；`post_frequency` 天/条、`social_heat_trend` 热度变化 %、`social_heat_window` 为热度读数的样本档名（档名即算式，两档不可互比）均为确定性派生；抓取失败全字段 UNKNOWN |
-| `scanner_snapshot` | 确定性层（外部 BinanceApi CSV） | ①（读） | 分支 ④ | `{date, market: {symbol: {...}}, microstructure: {symbol: {...}}}`：scan_ 前缀字段自带完整路径（basis 可引用） |
 | `signals` | 确定性层 + 情绪维度 | ② | 分支 ④ | `dict[symbol, {symbol, valuation:{value:{mc_fees,fdv_revenue,mc_tvl,fees_tvl}}, momentum:{value}, divergence:{value:{divergence_7d,divergence_30d,quadrant}}, sentiment:{components:{funding,funding_trend,funding_pctile_90d,funding_x_pctile,ls_ratio_all,ls_ratio_top_acc,ls_ratio_top_pos,taker_bs_ratio_1h,oi_change_24h,oi_price_divergence:{label,note},social_heat_trend,social_price_divergence:{label,note}}, note}, market_metrics:{value:{rv_7d,rv_30d,drawdown_1y,vol_adj_ret_7d,vol_adj_ret_30d,beta_30d,alpha_30d,turnover}}, error}]`（sentiment 为持仓指标原始直读，无阈值打分） |
-| **`bull_evidence`** | 分支证据 | bull_research | ③ ④ | `dict[symbol, list[EvidenceItem]]`：`{claim, basis:{domain, field, value}, source}`，条数不设上限（prompt 第 9 条：按重要性降序、禁同一事实拆条凑数）（多头分支独占字段） |
+| **`bull_evidence`** | 分支证据 | bull_research | ③ ④ | `dict[symbol, list[EvidenceItem]]`：`{claim, basis:{domain, field, value}, source}`，上限 15 条（prompt 第 9 条：按重要性降序、basis 三元组互不相同）（多头分支独占字段） |
 | **`bear_evidence`** | 分支证据 | bear_research | ③ ④ | 同上（空头分支独占字段） |
 | `bull_errors` / `bear_errors` | 分支留痕 | 分支节点 | ④ | `dict[symbol, str]`：分支异常消息（异常 → 该 token 该分支空清单，批不中断） |
 | **`evidence`** | 证据体系 | ③ | ④ | `dict[symbol, {bull_case: list[EvidenceItem], bear_case: list[EvidenceItem]}]`：两分支核验通过产物的合并陈列 |
@@ -91,7 +90,7 @@ flowchart TD
 | 多头证据研究员 | `bull_evidence` | 只找做多证据（增长/趋势/资金流入），输出带 basis 引用 |
 | 空头证据研究员 | `bear_evidence` | 只找做空证据（估值/拥挤/风险），输出带 basis 引用 |
 | 证据核验（机器强制） | `evidence` + `rejected_evidence` | basis 逐级解引用存在且值一致 → 通过；否则剔除留痕（LLM 无法覆盖，D8 决策） |
-| 数据域（可扩展） | `basis.domain` | signals / market_data / fundamental_data / microstructure_data / web_data / social_data / scanner_snapshot / market_env；新数据域 = 快照加域，分支零改动自动可见 |
+| 数据域（可扩展） | `basis.domain` | signals / market_data / fundamental_data / microstructure_data / web_data / social_data / market_env；新数据域 = 快照加域，分支零改动自动可见 |
 | Bull/Bear 两面解读 | 两分支并行 | 同消费同一份冻结快照、互不可见——同一数据可被两分支引用为相反证据，分歧点并列呈现 |
 
 **工件与宏观纪律在数据层的映射**：
@@ -200,7 +199,7 @@ def select_tokens(rules: list[ScreenRule], top_n: int = 10) -> ScreeningResult:
 7. per-token 社交装配（写入 `social_data`，X 公开主页抓取，`source=x_social`）：粉丝数 `follower_count` 与近 30 条推文 `posts[i]`（`likes`/`reposts`/`comments`/`views`/`time`，**页面原样文本**如 `16.3万`，不做归一化）；确定性派生三件（signals 纯函数，与 `oi_price_divergence` 同构）——发帖频率 `post_frequency`（天/条，推文相对时间跨度）、社交热度趋势 `social_heat_trend`（互动强度 = likes+reposts+comments，views 只算触达不计入；样本分档见 ②）、社交/价格背离 `social_price_divergence`（`{label, note}`，价涨热度升=confirm_long 等四态）；抓取失败全字段 UNKNOWN 且 `incomplete=True`。
 8. `meta.incomplete_tokens` 汇总数据不完整 token 清单（含失败原因）。
 
-**输出**：`market_data` / `fundamental_data` / `microstructure_data` / `web_data` / `social_data` / `scanner_snapshot` / `meta`
+**输出**：`market_data` / `fundamental_data` / `microstructure_data` / `web_data` / `social_data` / `meta`
 
 **伪代码**：
 
@@ -330,13 +329,13 @@ def sentiment_raw(mkt: dict | None, ms: dict | None = None, soc: dict | None = N
 
 **签名**：`def bull_research(state: dict) -> dict` / `def bear_research(state: dict) -> dict`（共用模板 `_branch(state, side, key)`）
 
-**输入**（只读，两分支同时消费同一份冻结快照）：`tokens` / `signals`（含 sentiment）/ 五快照 / `scanner_snapshot`
+**输入**（只读，两分支同时消费同一份冻结快照）：`tokens` / `signals`（含 sentiment）/ 五快照
 
 **处理步骤**（每分支对每个 symbol 串行，两分支之间互不可见）:
-1. 构建分支摘要 `build_branch_summary(symbol, state)`：确定性快照压缩——数字 + 变化率 + source 标签（含微观结构、社交与扫描器快照节），缺失一律 UNKNOWN，新闻 ≤3 条、推文明细最近 10 条（`_POST_RENDER_CAP`）；末尾追加指令行"只提取证据，禁止结论"。两分支共用同一份摘要（prompt 侧重引导：多头提示优先关注增长/趋势/资金流入，空头提示优先关注估值/拥挤/风险，无硬数据边界）。
+1. 构建分支摘要 `build_branch_summary(symbol, state)`：确定性快照压缩——数字 + 变化率 + source 标签（含微观结构、社交节），缺失一律 UNKNOWN，新闻 ≤3 条、推文明细最近 10 条（`_POST_RENDER_CAP`）；末尾追加指令行"只提取证据，禁止结论"。两分支共用同一份摘要（prompt 侧重引导：多头提示优先关注增长/趋势/资金流入，空头提示优先关注估值/拥挤/风险，无硬数据边界）。
 2. 单次 json_mode 调用：`get_llm(json_mode=True).with_retry(stop_after_attempt=2).invoke(...)`（分支不带工具），callbacks 挂 `live_call_counter(side)` 计数。
 3. `_extract_json` 取 `{evidence: [...]}`；逐条 `EvidenceItem.model_validate`，坏条目（claim/source 空）丢弃在装配层。
-4. 条数不设上限（prompt 第 9 条：有几条独立事实写几条，禁止拆条凑数——重复 claim 由 ③ 剔除）；单 token 异常 → 空清单 + `{side}_errors[symbol]` 留痕，批不中断。
+4. 条数上限 15 条（prompt 第 9 条：按重要性降序，每条 basis 三元组互不相同——重复引用由去重与 ③ 核验拦截）；单 token 异常 → 空清单 + `{side}_errors[symbol]` 留痕，批不中断。
 5. 只写本分支独占字段（`bull_evidence` / `bull_errors` 或 `bear_evidence` / `bear_errors`）——并行写共享键（meta 等）会触发 LangGraph 冲突；`node_order` 由串行的 evidence_verify 统一记录。
 
 **Schema（证据契约，spec 决策 4）**：
@@ -469,13 +468,13 @@ def _build_artifacts(state: dict) -> dict:
 严格遵守：
 1. 严禁编造：claim 与 basis 只能引用输入数据中的既有字段与数值；缺失写 UNKNOWN，禁止猜测。
 2. 每条证据必须包含：claim（主张）、basis（结构化数据引用三元组：domain 数据域 / field 点号路径 / value 引用时点的快照值，逐字来自输入）、source（与 basis.domain 一致）。
-3. basis.domain 只能取数据域白名单之一：signals / market_data / fundamental_data / microstructure_data / web_data / social_data / scanner_snapshot / market_env；禁止使用数据源名（binance / binance_futures / defillama / bing / x_social 等）或节标题（市场/基本面/新闻/社交）作为 domain。
-4. basis.field 必须引用到输入中的标量层（含 .value 后缀），如 momentum.value、divergence.value.quadrant、sentiment.components.funding、tvl.value、oi_change_24h.value；社交节推文序列为裸字段（posts[i].likes，无 .value 后缀，i 只能取摘要中实际出现过的下标，禁止引用未渲染的更早推文）；扫描器快照节字段自带完整路径（如 market.{SYMBOL}.price）。
+3. basis.domain 只能取数据域白名单之一：signals / market_data / fundamental_data / microstructure_data / web_data / social_data / market_env；禁止使用数据源名（binance / binance_futures / defillama / bing / x_social 等）或节标题（市场/基本面/新闻/社交）作为 domain。
+4. basis.field 必须引用到输入中的标量层（含 .value 后缀），如 momentum.value、divergence.value.quadrant、sentiment.components.funding、tvl.value、oi_change_24h.value；社交节推文序列为裸字段（posts[i].likes，无 .value 后缀，i 只能取摘要中实际出现过的下标，禁止引用未渲染的更早推文）。
 5. basis.value 必须逐字引用输入中该字段的显示值，禁止改写、重算或四舍五入。
 6. 只提取{多头|空头}视角证据，禁止给出决策、结论或建议（那是后续决策者的工作）。
-7. 扫描器快照节是截至节标题标注日期的静态历史数据，引用该节字段时claim 必须注明快照日期口径，禁止把快照窗口涨跌与实时数据（market_data 等）当作同一时点并置比较。
-8. claim 中出现的每个数值必须来自其 basis 引用的字段（允许该字段的派生表述），禁止把其他字段的数值归因到本字段（如把全账户多空比变化说成顶级账户变化），禁止使用输入中不存在的计算值（如比率换算、合成指标）。
-9. 数量不限，按重要性降序；充分挖掘摘要中的独立事实，有几条写几条，不设上限——但每条必须独立有据：禁止把同一事实拆成多条（如同一 claim 换 basis 重复引用），禁止无依据凑数。
+7. claim 中出现的每个数值必须来自其 basis 引用的字段（允许该字段的派生表述），禁止把其他字段的数值归因到本字段（如把全账户多空比变化说成顶级账户变化），禁止使用输入中不存在的计算值（如比率换算、合成指标）。
+8. 每条证据必须引用与已有条目不同的数据点（basis 三元组不同）；禁止把同一事实改写为多条证据凑数（如同一数值换 claim 表述重复引用）。
+9. 数量上限 15 条，按重要性降序，只保留最重要的独立事实。
 10. 输出 JSON：{"evidence": [{"claim": "...", "basis": {"domain": "...", "field": "...", "value": "..."}, "source": "..."}]}。
 ```
 
@@ -569,7 +568,7 @@ def _build_artifacts(state: dict) -> dict:
 4. **数据点包装**：所有数据源产出 `{value, source, timestamp, confidence}` 四元组，缺失字段标注 UNKNOWN。
 5. **宽容解析**：所有 LLM 结构化输出经 `_extract_json` 容错（代码块围栏 / 单引号键 / 尾部截断 / 未闭合括号），坏条目丢弃（evidence 按条目丢弃，不是整批失败）。
 6. **mock 仅限显式离线模式**：`SR_MOCK=1` 全离线可跑，mock 与真实路径字段同构，每新增数据源/工具同步 mock；**真实模式下任何数据源失败即失败**（error/UNKNOWN），降级 mock 行为被架构禁止。
-7. **source 与 domain 一致（schema 契约）**：证据的 source 必须与 basis.domain 一致（per-token 域 `signals` / `market_data` / `fundamental_data` / `microstructure_data` / `web_data` / `social_data` + 特殊根 `scanner_snapshot`（field 自带完整路径）/ `market_env`（meta 级全市场聚合））——prompt 第 2 条与 schema 共同约束（spec D4），机器核验对象是 basis 三元组（旧决策链 source 白名单退役）。
+7. **source 与 domain 一致（schema 契约）**：证据的 source 必须与 basis.domain 一致（per-token 域 `signals` / `market_data` / `fundamental_data` / `microstructure_data` / `web_data` / `social_data` + `market_env`（meta 级全市场聚合））——prompt 第 2 条与 schema 共同约束（spec D4），机器核验对象是 basis 三元组（旧决策链 source 白名单退役）。
 8. **证据无 confidence**：LLM 自评信心分是主观臆想，不进入证据体系——客观性由 basis 可复核性保证，不由 LLM 自评保证（spec D4）。
 9. **筛选纪律**：⑨ 是全架构唯一允许终止的节点——全量快照失败必须抛 `ScreeningError` 显式报错，禁止静默产出空批或回退固定候选（mock 模式除外）；筛选规则只允许确定性代码，禁止 LLM 参与选币；`SR_TOKENS` 覆盖仅用于调试与定向研究；`sector_cap` 只做既定名次上的席位截断，不判断板块优劣，板块索引不可用时约束不生效并写进 `meta.screening.rules` 留痕（辅助数据失败无权终止批）。
 10. **离线评估不回灌**：`lookback.py` 的读数只存在于它的 stdout——禁止写回 `snapshot.json` / 分支摘要 / prompt 或任何进图字段。描述性统计一旦被 LLM 在下一次运行里当证据引用，就会从“过去一起怎么动”变成自我强化的结论，违反 ADR 0001。

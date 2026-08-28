@@ -9,6 +9,7 @@ run.json 含数据快照投影 + 证据清单 + 信号快照 + llm_calls；candi
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -18,7 +19,11 @@ from strategy_research.env import (
     LIVE_CALL_COUNTS,
     is_mock_mode,
 )
-from strategy_research.scanner_snapshot import _strip_quote
+
+
+def _strip_quote(symbol: str) -> str:
+    """交易对 → 裸符号（BTWUSDT → BTW）：快照/对比 key 命名空间对齐。"""
+    return symbol.removesuffix("USDT")
 
 
 def _write_json(path: Path, obj: dict) -> None:
@@ -27,9 +32,14 @@ def _write_json(path: Path, obj: dict) -> None:
 
 
 def _run_dir() -> Path:
-    """reports/<ts>/ 运行目录 + reports/latest/ 软链目标（微秒级防同秒碰撞）。"""
+    """reports/<ts>/ 运行目录 + reports/latest/ 软链目标（微秒级防同秒碰撞）。
+
+    mock 落盘（SR_MOCK_REPORT=1）独立目录 reports/mock/<ts>/：与 live 隔离、
+    不触碰 latest/（mock 产物不冒充真实运行）。
+    """
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ%f")
-    return Path("reports") / ts
+    root = Path("reports") / "mock" if is_mock_mode() else Path("reports")
+    return root / ts
 
 
 def _llm_calls() -> dict:
@@ -39,20 +49,64 @@ def _llm_calls() -> dict:
     return counts
 
 
-def build_report(state: dict, meta: dict) -> tuple[Path, dict]:
+#: degraded 阈值：剔除率（剔除/(通过+剔除)）超过此值 → degraded（用户确认 50%）
+_DEGRADED_REJECT_RATIO = 0.5
+
+
+def _compute_status(run_meta: dict, state: dict) -> tuple[str, str]:
+    """运行健康度：failed（LLM 全挂）/ degraded（部分异常或高剔除率）/ ok。
+
+    判定顺序：llm_calls.total == 0 → failed（API key 缺失等全挂，对应 8/25 首份）；
+    否则任一分支异常 / incomplete_tokens 非空 / 剔除率超阈值 → degraded；其余 ok。
+    返回 (status, reason)；ok 时 reason 为空串（不写噪音）。
+    """
+    if (run_meta.get("llm_calls") or {}).get("total", 0) == 0:
+        return "failed", "LLM 调用数为 0（API key 缺失或模型全挂）"
+    reasons: list[str] = []
+    if run_meta.get("bull_errors") or run_meta.get("bear_errors"):
+        reasons.append("分支异常")
+    if run_meta.get("incomplete_tokens"):
+        reasons.append("数据不完整: " + ", ".join(run_meta["incomplete_tokens"]))
+    evidence = state.get("evidence") or {}
+    passed = 0
+    for s in state.get("tokens") or []:
+        ev = evidence.get(s) or {}
+        passed += len(ev.get("bull_case") or []) + len(ev.get("bear_case") or [])
+    rejected = sum(
+        len(r) for r in (state.get("rejected_evidence") or {}).values()
+    )
+    total = passed + rejected
+    if total and rejected / total > _DEGRADED_REJECT_RATIO:
+        reasons.append(f"剔除率 {rejected}/{total} 超阈值")
+    if reasons:
+        return "degraded", "；".join(reasons)
+    return "ok", ""
+
+
+def build_report(state: dict, meta: dict) -> tuple[Path | None, dict]:
     """落盘 run.json + evidence.md + candidates.json + snapshot/signal_diff。
 
     04 票：run.json = meta + 数据快照投影 + 证据清单 + 信号快照（spec D8）；
     candidates 仅候选列表（分级退役）；evidence.md 替代 overview.md（spec D7）。
-    返回 (报告目录, artifacts)。工件/快照异常仅记 meta.report_error，
+    返回 (报告目录, artifacts)；mock 默认不落盘（SR_MOCK_REPORT=1 才写）——回归
+    跑批不污染 reports/，report_path 置 None。工件/快照异常仅记 meta.report_error，
     不拖累已落盘的 run.json/evidence.md。
     """
+    # mock 默认不落盘：仅返回 artifacts 与 meta（report_path=None）；
+    # llm_calls 仍同步进 meta（成本统计不随落盘开关丢失）
+    meta["llm_calls"] = _llm_calls()
+    if is_mock_mode() and os.environ.get("SR_MOCK_REPORT") != "1":
+        return None, _build_artifacts(state, "mock")
+
     run_dir = _run_dir()
     run_dir.mkdir(parents=True, exist_ok=True)
 
     mode = "mock" if is_mock_mode() else "live"
+    # candidates 的 mode 三态（auto/manual/mock）：screening.mode 缺失按 manual 兜底
+    cand_mode = "mock" if is_mock_mode() else (meta.get("screening") or {}).get(
+        "mode", "manual"
+    )
     run_ts = datetime.now(timezone.utc).isoformat()
-    meta["llm_calls"] = _llm_calls()
 
     run_meta: dict = {
         "mode": mode,
@@ -63,15 +117,15 @@ def build_report(state: dict, meta: dict) -> tuple[Path, dict]:
         "llm_calls": meta["llm_calls"],
         "market_env": meta.get("market_env"),
     }
-    if meta.get("scanner") is not None:  # 仅真实模式（main 注入补跑状态）落盘
-        run_meta["scanner"] = meta["scanner"]
     # 分支异常留痕（06 票补漏：LLM 失败/空证据可诊断，不再黑盒）
     run_meta["bull_errors"] = state.get("bull_errors") or {}
     run_meta["bear_errors"] = state.get("bear_errors") or {}
     if meta.get("incomplete_tokens"):
         run_meta["incomplete_tokens"] = meta["incomplete_tokens"]
-    if meta.get("scan_error"):
-        run_meta["scan_error"] = meta["scan_error"]
+    if meta.get("incomplete_detail"):
+        run_meta["incomplete_detail"] = meta["incomplete_detail"]
+    # 运行健康度（全挂 failed / 部分异常或高剔除率 degraded / 其余 ok）
+    run_meta["status"], run_meta["status_reason"] = _compute_status(run_meta, state)
     run = {
         "meta": run_meta,
         "evidence": state.get("evidence") or {},
@@ -84,9 +138,9 @@ def build_report(state: dict, meta: dict) -> tuple[Path, dict]:
     # 04 票：candidates 工件 + 信号快照/对比（独立 try：失败仅记 report_error）
     artifacts: dict = {"candidates": []}
     try:
-        artifacts = _build_artifacts(state)
+        artifacts = _build_artifacts(state, cand_mode)
         _write_json(run_dir / "candidates.json", artifacts)
-        _write_snapshot_and_diff(state, run_ts, mode)
+        _write_snapshot_and_diff(state, run_ts, mode, run_dir)
     except Exception as exc:  # 规格：快照/对比失败不中断批
         meta["report_error"] = f"工件/快照落盘失败: {exc}"
 
@@ -94,22 +148,25 @@ def build_report(state: dict, meta: dict) -> tuple[Path, dict]:
         _render_evidence_md(state, run), encoding="utf-8"
     )
 
-    latest = Path("reports") / "latest"
-    latest.mkdir(parents=True, exist_ok=True)
-    for f in ("run.json", "evidence.md", "candidates.json"):
-        if not (run_dir / f).exists():
-            continue  # 工件落盘失败时不断链
-        dest = latest / f
-        if dest.exists() or dest.is_symlink():
-            dest.unlink()
-        # 软链目标相对 latest/ 解析：reports/latest/../<ts>/<f>
-        dest.symlink_to(Path("..") / run_dir.name / f)
+    # latest/ 软链仅在 live 更新：mock 产物（SR_MOCK_REPORT=1）不触碰 latest
+    if not is_mock_mode():
+        latest = Path("reports") / "latest"
+        latest.mkdir(parents=True, exist_ok=True)
+        for f in ("run.json", "evidence.md", "candidates.json"):
+            if not (run_dir / f).exists():
+                continue  # 工件落盘失败时不断链
+            dest = latest / f
+            if dest.exists() or dest.is_symlink():
+                dest.unlink()
+            # 软链目标相对 latest/ 解析：reports/latest/../<ts>/<f>
+            dest.symlink_to(Path("..") / run_dir.name / f)
     return run_dir, artifacts
 
 
-def _build_artifacts(state: dict) -> dict:
-    """candidates 工件（04 票简化）：仅候选列表（机会分级/流动性分层退役，spec D8）。"""
-    return {"candidates": list(state["tokens"])}
+def _build_artifacts(state: dict, mode: str) -> dict:
+    """candidates 工件（04 票简化 + mode 标注）：候选列表 + 运行模式
+    （auto/manual/mock——消除手动模式歧义，mode 缺失按 manual 兜底）。"""
+    return {"mode": mode, "candidates": list(state["tokens"])}
 
 
 # ── 04 票：信号快照 + 数据快照投影（确定性） ──────────────────
@@ -236,10 +293,8 @@ def _signal_snapshot(symbol: str, state: dict) -> dict:
 
 def _build_data_snapshot(state: dict) -> dict:
     """数据快照投影（spec D8）：per-token 各数据域轻量投影（证据可复核的原始数据）。"""
-    scanner = state.get("scanner_snapshot") or {}
     snap: dict[str, dict] = {}
     for s in state["tokens"]:
-        base = _strip_quote(s)  # 快照 key 为裸符号，消费点对齐命名空间
         snap[s] = {
             "signals": (state.get("signals") or {}).get(s) or {},
             "market_data": (state.get("market_data") or {}).get(s) or {},
@@ -248,33 +303,51 @@ def _build_data_snapshot(state: dict) -> dict:
             or {},
             "web_data": (state.get("web_data") or {}).get(s) or {},
             "social_data": (state.get("social_data") or {}).get(s) or {},
-            "scanner_snapshot": {
-                "date": scanner.get("date"),
-                "market": (scanner.get("market") or {}).get(base) or {},
-                "microstructure": (scanner.get("microstructure") or {}).get(base)
-                or {},
-            },
         }
     return snap
 
 
 def _build_snapshot(state: dict, run_ts: str, mode: str) -> dict:
-    """当前批信号快照（spec D8）：确定性信号投影 per-token，无 decision 语义。"""
+    """当前批信号快照（spec D8）：确定性信号投影 per-token，无 decision 语义。
+
+    signals 键用裸符号（_strip_quote）：手动输入（CYS/AKE）与自动前缀
+    （BTWUSDT）在对比层对齐，跨批 diff 的 key 一致才可复核。tokens 列表保持
+    原样（记录输入形态，不作归一）。
+    """
     return {
         "run_ts": run_ts,
         "mode": mode,
         "tokens": state["tokens"],
-        "signals": {s: _signal_snapshot(s, state) for s in state["tokens"]},
+        "signals": {
+            _strip_quote(s): _signal_snapshot(s, state) for s in state["tokens"]
+        },
     }
 
 
-def _read_prev_snapshot() -> dict | None:
-    """读 reports/latest/snapshot.json 为 prev；不存在/损坏 → None（首次运行语义）。"""
-    path = Path("reports") / "latest" / "snapshot.json"
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):  # 含 JSONDecodeError/UnicodeDecodeError
-        return None
+def _read_prev_snapshot(tokens: list[str]) -> dict | None:
+    """跨报告目录找 prev：遍历 reports/2*/snapshot.json（live 归档），取 run_ts
+    最新且与当前 tokens（裸符号）有交集的一份。
+
+    替代「仅比上一次运行」：latest 可能被无关批（手动/自动交替）覆盖，交集
+    保证对比对象与当前批同标的可比；无交集或全部损坏 → None（首次运行语义）。
+    """
+    want = {_strip_quote(t) for t in tokens}
+    best: tuple[datetime, dict] | None = None
+    for path in sorted(Path("reports").glob("2*/snapshot.json")):
+        try:
+            snap = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):  # 含 JSONDecodeError/UnicodeDecodeError
+            continue
+        have = {_strip_quote(t) for t in (snap.get("tokens") or [])}
+        if not (want & have):
+            continue
+        try:
+            ts = datetime.fromisoformat(snap["run_ts"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if best is None or ts > best[0]:
+            best = (ts, snap)
+    return best[1] if best else None
 
 
 #: 信号物性阈值（09 票）：变化超过旧值绝对值的 1% 才算「不同」
@@ -338,15 +411,22 @@ def _build_signal_diff(prev: dict | None, cur: dict) -> dict:
     return diff
 
 
-def _write_snapshot_and_diff(state: dict, run_ts: str, mode: str) -> dict:
-    """信号快照覆盖 + 对比落盘（reports/latest/，先读旧为 prev 再覆盖）。"""
-    latest = Path("reports") / "latest"
-    latest.mkdir(parents=True, exist_ok=True)
+def _write_snapshot_and_diff(
+    state: dict, run_ts: str, mode: str, run_dir: Path | None = None
+) -> dict:
+    """信号快照对比落盘：run_dir/ 内归档 snapshot.json + signal_diff.json（历史可回溯）；
+    live 模式另更新 reports/latest/（先读旧为 prev 再覆盖），mock 不触碰 latest。"""
     snapshot = _build_snapshot(state, run_ts, mode)
-    prev = _read_prev_snapshot()
-    _write_json(latest / "snapshot.json", snapshot)
+    prev = _read_prev_snapshot(state["tokens"])
     diff = _build_signal_diff(prev, snapshot)
-    _write_json(latest / "signal_diff.json", diff)
+    if run_dir is not None:
+        _write_json(run_dir / "snapshot.json", snapshot)
+        _write_json(run_dir / "signal_diff.json", diff)
+    if not is_mock_mode():
+        latest = Path("reports") / "latest"
+        latest.mkdir(parents=True, exist_ok=True)
+        _write_json(latest / "snapshot.json", snapshot)
+        _write_json(latest / "signal_diff.json", diff)
     return diff
 
 
@@ -373,12 +453,10 @@ def _price_text(value) -> str:
 def _evidence_section_lines(
     symbol: str,
     ev: dict,
-    scan_date: str | None = None,
     errors: dict | None = None,
 ) -> list[str]:
     """单 token 证据节：### 做多证据 / ### 做空证据 两张表（# | claim | basis | source）。
 
-    scan_date：扫描器快照日期（存在时在节头标注，防旧快照被误读为实时，07 票）；
     errors：{side: 错误消息}（LLM 失败/空证据留痕，非空时节头标注，不再静默 0 证据）。
     """
     lines = [f"## {symbol}", ""]
@@ -387,8 +465,6 @@ def _evidence_section_lines(
             if msg:
                 label = "做多" if side == "bull" else "做空"
                 lines += [f"- {label}分支异常：{msg}", ""]
-    if scan_date:
-        lines += [f"- 扫描器快照日期：{scan_date}", ""]
     for title, items in (
         ("做多证据", ev.get("bull_case") or []),
         ("做空证据", ev.get("bear_case") or []),
@@ -467,14 +543,30 @@ def _render_evidence_md(state: dict, run: dict) -> str:
         "# 证据报告",
         "",
         f"- 运行模式：`{meta['mode']}`",
-        f"- 时间：{meta['run_ts']}",
+        f"- 时间（UTC）：{meta['run_ts']}",
+    ]
+    # 本地时间（含时区偏移，如 +08:00）：人工读报告时对照自己的时区
+    local_now = datetime.now().astimezone()
+    offset = local_now.strftime("%z")
+    offset = f"{offset[:3]}:{offset[3:]}" if len(offset) == 5 else offset
+    lines.append(
+        f"- 本地时间：{local_now.strftime('%Y-%m-%d %H:%M:%S')} {offset}"
+    )
+    lines += [
         f"- tokens：{', '.join(state['tokens'])}",
         f"- LLM 调用：{meta.get('llm_calls', {}).get('total', 0)}",
+    ]
+    status = meta.get("status", "ok")
+    status_line = f"- 运行状态：{status}"
+    if status in ("degraded", "failed") and meta.get("status_reason"):
+        status_line += f"（{meta['status_reason']}）"
+    lines += [
+        status_line,
         "",
         "## 总览",
         "",
-        "| token | 最新价格 | 做多通过 | 做空通过 | 剔除 | 数据域覆盖 |",
-        "|---|---|---|---|---|---|",
+        "| token | 最新价格 | 信号缺失 | 做多通过 | 做空通过 | 剔除 | 数据域覆盖 |",
+        "|---|---|---|---|---|---|---|",
     ]
     for s in state["tokens"]:
         ev = evidence.get(s) or {}
@@ -482,8 +574,10 @@ def _render_evidence_md(state: dict, run: dict) -> str:
         bear = ev.get("bear_case") or []
         domains = ", ".join(_domains(bull + bear)) or "—"
         price = ((state.get("market_data") or {}).get(s) or {}).get("price") or {}
+        # 信号缺失列：确定性信号投影中 None 键计数（数据可用性诊断）
+        missing = sum(1 for v in _signal_snapshot(s, state).values() if v is None)
         lines.append(
-            f"| {s} | {_price_text(price.get('value'))} | {len(bull)} | {len(bear)} "
+            f"| {s} | {_price_text(price.get('value'))} | {missing} | {len(bull)} | {len(bear)} "
             f"| {len(rejected.get(s) or [])} | {domains} |"
         )
     lines += [
@@ -499,7 +593,6 @@ def _render_evidence_md(state: dict, run: dict) -> str:
         lines += _evidence_section_lines(
             s,
             evidence.get(s) or {},
-            ((state.get("scanner_snapshot") or {}).get("date")),
             branch_errors.get(s),
         )
     lines += _rejected_lines(rejected, state["tokens"])

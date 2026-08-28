@@ -46,7 +46,7 @@ _HIDDEN: dict[str, str] = {
     ),
 }
 
-#: 参与契约的 per-token 数据域（scanner_snapshot / market_env 为 meta 级，另测）
+#: 参与契约的 per-token 数据域（market_env 为 meta 级，另测）
 _DOMAINS = (
     "fundamental_data",
     "market_data",

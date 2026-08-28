@@ -40,7 +40,7 @@
 - `TokenAnalysis` (`schemas.py:145-188`) has NO horizon/validity/invalidation field (explicitly rejected in docstring, `schemas.py:146`). So the decision carries no expiry; the 7d review window is an evaluation-side assumption the LLM is told to ignore. Mismatch: the LLM may set expectations that the 7d evaluation can't match.
 
 ## 7. Test coverage gaps
-- Thin: `test_main.py`=1, `test_graph.py`=3, `test_base.py`=5, `test_collect.py`=6, `test_scanner_snapshot.py`=7. Nodes are tested only via LLM-mocked `test_nodes_llm.py` (14) + `test_risk_check.py` (17) + `test_e2e_smoke.py` (11); no direct deterministic node-function tests for decide/finalize nodes.
+- Thin: `test_main.py`=1, `test_graph.py`=3, `test_base.py`=5, `test_collect.py`=6. Nodes are tested only via LLM-mocked `test_nodes_llm.py` (14) + `test_risk_check.py` (17) + `test_e2e_smoke.py` (11); no direct deterministic node-function tests for decide/finalize nodes.
 - Confidence calibration IS tested: `review.py:_calibrate` covered by `test_review.py:87-107` (bins/groups, empty), plus `_returns` `test_review.py:42-73` and `_hit`. Good.
 - No test validates `_QUOTES` duplication consistency, prompt/rendering parity, or signal-outcome predictive power.
 

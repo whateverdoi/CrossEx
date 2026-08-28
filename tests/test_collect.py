@@ -260,6 +260,7 @@ def test_mock_collect_full_snapshot() -> None:
 
     # mock 全 6 token 数据齐全（链类 mcap/fdv 为结构性缺失，不计 incomplete）
     assert res["meta"]["incomplete_tokens"] == []
+    assert res["meta"]["incomplete_detail"] == {}
 
 
 def test_mock_shared_fetched_once(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -337,6 +338,7 @@ def test_failure_marks_unknown_not_abort(monkeypatch: pytest.MonkeyPatch) -> Non
     assert res["market_data"]["XRP"]["error"] == "装配异常: 注入失败"
     assert res["market_data"]["XRP"]["incomplete"] is True
     assert "XRP" in res["meta"]["incomplete_tokens"]
+    assert "mkt" in res["meta"]["incomplete_detail"]["XRP"]  # 缺失域名细粒度
     assert res["market_data"]["BTC"]["price"]["value"] is not None  # 其余正常
     assert res["market_data"]["BTC"]["incomplete"] is False
 

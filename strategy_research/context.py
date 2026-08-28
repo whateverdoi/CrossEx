@@ -102,10 +102,6 @@ _FIELD_NOTES: tuple[str, ...] = (
         "（rising / flat / falling）；stablecoin_change_30d：近 30 天稳定币供应变化 %，"
         "正=供应扩张"
     ),
-    (
-        "scanner_snapshot 各字段：截至节标题标注日期的静态历史窗口，禁止与实时字段"
-        "当作同一时点并置比较"
-    ),
 )
 
 #: sentiment 解读规则锚点（快照侧留痕）：与摘要口径注记同源拼接，不再两处维护
@@ -123,28 +119,24 @@ _BRANCH_RULES = (
     "2. 每条证据必须包含：claim（主张）、basis（结构化数据引用三元组：domain 数据域 / "
     "field 点号路径 / value 引用时点的快照值，逐字来自输入）、source（与 basis.domain 一致）。\n"
     "3. basis.domain 只能取数据域白名单之一：signals / market_data / fundamental_data / "
-    "microstructure_data / web_data / social_data / scanner_snapshot / market_env；禁止使用数据源名（binance / "
+    "microstructure_data / web_data / social_data / market_env；禁止使用数据源名（binance / "
     "binance_futures / defillama / bing / x_social 等）或节标题（市场/基本面/新闻/社交）作为 domain。\n"
     "4. basis.field 必须引用到输入中的标量层（含 .value 后缀），如 momentum.value、"
     "divergence.value.quadrant、sentiment.components.funding、tvl.value、"
     "oi_change_24h.value；社交节推文序列为裸字段（posts[i].likes，无 .value 后缀，"
-    "i 只能取摘要中实际出现过的下标，禁止引用未渲染的更早推文）；"
-    "扫描器快照节字段自带完整路径（如 market.{SYMBOL}.price）。\n"
+    "i 只能取摘要中实际出现过的下标，禁止引用未渲染的更早推文）。\n"
     "5. basis.value 必须逐字引用输入中该字段的显示值，禁止改写、重算或四舍五入。\n"
     "6. 只提取"
 )
 
 _BRANCH_OUTPUT = (
     "证据，禁止给出决策、结论或建议（那是后续决策者的工作）。\n"
-    "7. 扫描器快照节是截至节标题标注日期的静态历史数据，引用该节字段时"
-    "claim 必须注明快照日期口径，禁止把快照窗口涨跌与实时数据（market_data 等）"
-    "当作同一时点并置比较。\n"
-    "8. claim 中出现的每个数值必须来自其 basis 引用的字段（允许该字段的派生"
+    "7. claim 中出现的每个数值必须来自其 basis 引用的字段（允许该字段的派生"
     "表述），禁止把其他字段的数值归因到本字段（如把全账户多空比变化说成"
     "顶级账户变化），禁止使用输入中不存在的计算值（如比率换算、合成指标）。\n"
-    "9. 数量不限，按重要性降序；充分挖掘摘要中的独立事实，有几条写几条，"
-    "不设上限——但每条必须独立有据：禁止把同一事实拆成多条（如同一 claim "
-    "换 basis 重复引用），禁止无依据凑数。\n"
+    "8. 每条证据必须引用与已有条目不同的数据点（basis 三元组不同）；禁止把"
+    "同一事实改写为多条证据凑数（如同一数值换 claim 表述重复引用）。\n"
+    "9. 数量上限 15 条，按重要性降序，只保留最重要的独立事实。\n"
     '10. 输出 JSON：{"evidence": [{"claim": "...", "basis": '
     '{"domain": "...", "field": "...", "value": "..."}, '
     '"source": "..."}]}。'
@@ -193,25 +185,6 @@ def _pct_text(dp: dict | None) -> str:
 def _num_text(value: Any) -> str:
     """裸数值 → 2 位小数文本；非数值 → UNKNOWN。"""
     return "UNKNOWN" if not isinstance(value, (int, float)) else f"{value:.2f}"
-
-
-def _snap_num(value: Any, decimals: int = 2) -> str:
-    """扫描器裸数值 → 指定精度文本；缺失 → UNKNOWN。"""
-    return "UNKNOWN" if not isinstance(value, (int, float)) else f"{value:.{decimals}f}"
-
-
-def _snap_pct(value: Any) -> str:
-    """扫描器百分比字段（value 本身是 % 数值）；缺失 → UNKNOWN。"""
-    return "UNKNOWN" if not isinstance(value, (int, float)) else f"{value:.2f}%"
-
-
-def _snap_key(symbol: str) -> str:
-    """扫描器快照查询 key = 裸符号（与 scanner_snapshot._strip_quote 同构）。
-
-    scanner_snapshot 在数据源边界已归一化为裸符号（AKEUSDT → AKE，与
-    defillama 命名空间一致）；state.tokens 为全符号，此处消费点对齐。
-    """
-    return symbol.removesuffix("USDT")
 
 
 def _signal_lines(symbol: str, state: dict) -> list[str]:
@@ -365,52 +338,6 @@ def _facts_summary_lines(symbol: str, state: dict) -> list[str]:
         )
         + (f"  liq_imbalance.value.note: {imb['note']}" if imb.get("note") else "")
     )
-    snap = state.get("scanner_snapshot") or {}
-    base = _snap_key(symbol)  # 快照 key 为裸符号，消费点对齐命名空间
-    msnap = (snap.get("market") or {}).get(base) or {}
-    micsnap = (snap.get("microstructure") or {}).get(base) or {}
-    if msnap or micsnap:  # 快照缺失 → 跳过该节，仅确定性信号照常
-        day = snap.get("date") or "未知"
-        lines += [
-            "",
-            f"== 扫描器快照（scanner_snapshot，截至 {day}，field 直接抄写下方完整路径）==",
-        ]
-        if msnap:
-            boards = "、".join(msnap.get("boards") or []) or "UNKNOWN"
-            lines.append(
-                f"market.{base}.price: {_snap_num(msnap.get('price'), 6)}"
-                f" market.{base}.quote_volume_24h: {_snap_num(msnap.get('quote_volume_24h'))}"
-                f" market.{base}.open_interest_value: {_snap_num(msnap.get('open_interest_value'))}"
-            )
-            lines.append(
-                f"market.{base}.ret_1h: {_snap_pct(msnap.get('ret_1h'))}"
-                f" market.{base}.ret_4h: {_snap_pct(msnap.get('ret_4h'))}"
-                f" market.{base}.ret_24h: {_snap_pct(msnap.get('ret_24h'))}"
-                f" market.{base}.ret_7d: {_snap_pct(msnap.get('ret_7d'))}"
-                f" market.{base}.price_change_pct_24h: {_snap_pct(msnap.get('price_change_pct_24h'))}"
-            )
-            lines.append(
-                f"market.{base}.funding_rate: {_snap_num(msnap.get('funding_rate'), 6)}"
-                f" market.{base}.futures_premium_pct: {_snap_pct(msnap.get('futures_premium_pct'))}"
-                f" market.{base}.listing_days: {_snap_num(msnap.get('listing_days'), 1)}"
-                f" market.{base}.onboard_date: {msnap.get('onboard_date') or 'UNKNOWN'}"
-                f" market.{base}.boards: {boards}"
-            )
-        if micsnap:
-            lines.append(
-                f"microstructure.{base}.oi_change_24h: {_snap_pct(micsnap.get('oi_change_24h'))}"
-                f" microstructure.{base}.oi_change_48h: {_snap_pct(micsnap.get('oi_change_48h'))}"
-                f" microstructure.{base}.oi_value_change_24h: {_snap_pct(micsnap.get('oi_value_change_24h'))}"
-                f" microstructure.{base}.ls_ratio_all: {_snap_num(micsnap.get('ls_ratio_all'))}"
-                f" microstructure.{base}.ls_ratio_all_change_24h: {_snap_pct(micsnap.get('ls_ratio_all_change_24h'))}"
-            )
-            lines.append(
-                f"microstructure.{base}.ls_ratio_top_acc: {_snap_num(micsnap.get('ls_ratio_top_acc'))}"
-                f" microstructure.{base}.ls_ratio_top_pos: {_snap_num(micsnap.get('ls_ratio_top_pos'))}"
-                f" microstructure.{base}.taker_bs_ratio: {_snap_num(micsnap.get('taker_bs_ratio'))}"
-                f" microstructure.{base}.funding_avg: {_snap_num(micsnap.get('funding_avg'), 6)}"
-                f" microstructure.{base}.funding_trend: {micsnap.get('funding_trend') or 'UNKNOWN'}"
-            )
     lines += ["", "== 信号（signals）=="]
     lines += _signal_lines(symbol, state)
     lines += ["", "== 新闻（web_data，≤3 条）=="]

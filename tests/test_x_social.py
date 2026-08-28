@@ -337,5 +337,4 @@ def test_collect_data_social_snapshot() -> None:
         "microstructure_data",
         "web_data",
         "social_data",
-        "scanner_snapshot",
     }

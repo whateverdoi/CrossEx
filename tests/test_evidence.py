@@ -55,7 +55,6 @@ def _state() -> dict:
         "microstructure_data": {"BTC": {"oi_change_24h": {"value": 0.0}}},
         "social_data": {"BTC": {"post_frequency": {"value": 3.23}}},
         "web_data": {"BTC": {"items": None}},
-        "scanner_snapshot": {"market": {"BTC": {"price": 70000.0}}},
     }
 
 
@@ -351,14 +350,6 @@ def test_verify_none_value_rejected() -> None:
     assert rejected["BTC"][0]["reason"].startswith("值不一致")
 
 
-def test_verify_scanner_snapshot_domain() -> None:
-    """scanner_snapshot 域：field 自带完整路径（market.BTC.price），不做 symbol 注入。"""
-    bull = [_ev(domain="scanner_snapshot", field="market.BTC.price", value="70000.0")]
-    verified, rejected = ev.verify_evidence({"BTC": bull}, {}, _state())
-    assert len(verified["BTC"]["bull_case"]) == 1
-    assert rejected == {}
-
-
 def test_verify_claim_invented_number_rejected() -> None:
     """claim 含输入中不存在的数值（编造，如 99.99%）：剔除留痕（07 票弱检查）。"""
     bull = [_ev(claim="7日涨幅达 99.99%，强势")]
@@ -528,15 +519,16 @@ def test_branch_nodes_mock_structured_evidence() -> None:
 
 
 def test_branch_bad_items_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
-    """坏条目丢弃：claim/source 缺失条目不进产出（交核验前已滤）；数量不设上限全保留。"""
+    """坏条目丢弃：claim/source 缺失条目不进产出（交核验前已滤）；
+    同 basis 三元组的溢出条去重只留首条（上限 15 + 机器去重兜底）。"""
     raw = {
         "evidence": [
             {
                 "claim": "好条目",
                 "basis": {
                     "domain": "signals",
-                    "field": "momentum.value",
-                    "value": "6.25",
+                    "field": "divergence.value.quadrant",
+                    "value": "III",
                 },
                 "source": "signals",
             },
@@ -576,9 +568,32 @@ def test_branch_bad_items_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(nodes.env, "get_llm", lambda *a, **k: fake)
     out = nodes.bull_research({"tokens": ["BTC"]})
     items = out["bull_evidence"]["BTC"]
-    assert len(items) == 11  # 好条目 1 + 溢出 10 → 全保留（数量不限）
+    # 好条目 1 + 同三元组 10 条去重只留首条 → 2 条（坏条目已滤）
+    assert len(items) == 2
     assert all(item["claim"] and item["source"] for item in items)
     assert items[0]["claim"] == "好条目"
+    assert items[1]["claim"] == "第 0 条"  # 同 basis 三元组保留首条
+
+
+def test_dedup_evidence_basis_triple_and_claim() -> None:
+    """去重纯函数：同 basis 三元组保留首条；同 claim（去空白归一化）改写保留首条；
+    顺序保持 LLM 输出序（按重要性降序，去重不重排）。"""
+    items = [
+        {"claim": "动量分 6.25 处增长区", "basis": {"domain": "signals", "field": "momentum.value", "value": "6.25"}, "source": "signals"},
+        {"claim": "动量分 6.25 处增长区（换措辞）", "basis": {"domain": "signals", "field": "momentum.value", "value": "6.25"}, "source": "signals"},  # 同三元组
+        {"claim": "动量分 6.25 处\n增长区 ", "basis": {"domain": "signals", "field": "divergence.value.quadrant", "value": "III"}, "source": "signals"},  # 三元组不同但去空白后同 claim
+        {"claim": "价格 70000 美元", "basis": {"domain": "market_data", "field": "price.value", "value": "70000.0"}, "source": "market_data"},
+    ]
+    out = ev.dedup_evidence(items)
+    assert [it["claim"] for it in out] == ["动量分 6.25 处增长区", "价格 70000 美元"]
+
+    # 空白差异归一：claim 含多余空格/换行视为同一条
+    spaced = [
+        {"claim": "TVL 上升", "basis": {"domain": "fundamental_data", "field": "tvl_trend_30d", "value": "rising"}, "source": "fundamental_data"},
+        {"claim": " TVL \n上升 ", "basis": {"domain": "fundamental_data", "field": "tvl_trend_30d", "value": "rising"}, "source": "fundamental_data"},
+    ]
+    assert len(ev.dedup_evidence(spaced)) == 1
+    assert ev.dedup_evidence([]) == []
 
 
 def test_branch_single_token_error_empty(monkeypatch: pytest.MonkeyPatch) -> None:

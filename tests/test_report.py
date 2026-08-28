@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -29,58 +30,95 @@ def _mk_state(tokens, volumes=None) -> dict:
 
 
 def test_build_report_writes_artifacts_snapshot_diff(monkeypatch, tmp_path):
-    """验收（04 票）：candidates.json 仅候选列表（reports/<ts> + latest 软链）
-    + 信号快照/diff（latest）。"""
+    """验收（04 票）：mock + SR_MOCK_REPORT=1 落盘 reports/mock/<ts>（candidates.json
+    + 快照归档随目录），latest/ 不被 mock 触碰（软链与快照均不更新）。"""
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SR_MOCK_REPORT", "1")
     state = _evidence_state()
     run_dir, artifacts = report.build_report(state, {})
+    assert run_dir.parent.name == "mock"  # mock 独立目录
     cand = json.loads((run_dir / "candidates.json").read_text(encoding="utf-8"))
-    assert cand == artifacts == {"candidates": ["BTC", "ETH"]}
-    assert (Path("reports") / "latest" / "snapshot.json").is_file()
-    assert (Path("reports") / "latest" / "signal_diff.json").is_file()
-    # 三软链 + 快照/对比两文件（原 overview.md 软链退役）
-    for f in ("run.json", "evidence.md", "candidates.json"):
-        assert (Path("reports") / "latest" / f).is_symlink(), f
+    assert cand == artifacts == {"mode": "mock", "candidates": ["BTC", "ETH"]}
+    assert (run_dir / "snapshot.json").is_file()  # 快照归档随目录
+    assert (run_dir / "signal_diff.json").is_file()
+    assert not (Path("reports") / "latest").exists()  # mock 不触碰 latest
 
 
 def test_snapshot_disk_roundtrip(monkeypatch, tmp_path):
-    """落盘语义（04 票信号快照）：首运行全 new → 二次信号变化得 changed（快照覆盖
-    为最新）→ 损坏快照视为无 prev（不抛异常）。轻量走 _write_snapshot_and_diff。"""
+    """落盘语义（04 票信号快照）：首运行全 new → 二次信号变化得 changed（跨报告
+    目录找最新且同标的 prev，替代仅比 latest）→ 损坏快照视为无 prev（不抛异常）。
+    轻量走 _write_snapshot_and_diff。SR_MOCK=0 走 live 语义（latest 更新）；纯落盘不联网。"""
     monkeypatch.chdir(tmp_path)
-    report._write_snapshot_and_diff(_evidence_state(), "t0", "mock")
-    diff = json.loads(
-        (Path("reports") / "latest" / "signal_diff.json").read_text(encoding="utf-8")
+    monkeypatch.setenv("SR_MOCK", "0")  # live 语义：latest 快照覆盖链
+    d1 = Path("reports") / "20260101T000000Z000"
+    d1.mkdir(parents=True)
+    report._write_snapshot_and_diff(
+        _evidence_state(), "2026-01-01T00:00:00+00:00", "live", d1
     )
+    diff = json.loads((d1 / "signal_diff.json").read_text(encoding="utf-8"))
     assert diff["BTC"]["action"] == "new"
     assert diff["ETH"]["action"] == "new"
 
-    # 第二次运行：BTC momentum 6.25 → 5.0（信号变化）→ changed；ETH 不变 → unchanged
+    # 第二次运行（新目录）：跨目录找 prev（run_ts 最新且有交集）→ BTC 变化
     cur = _evidence_state()
     cur["signals"]["BTC"]["momentum"]["value"] = 5.0
-    report._write_snapshot_and_diff(cur, "t2", "mock")
-    diff = json.loads(
-        (Path("reports") / "latest" / "signal_diff.json").read_text(encoding="utf-8")
+    d2 = Path("reports") / "20260102T000000Z000"
+    d2.mkdir(parents=True)
+    report._write_snapshot_and_diff(
+        cur, "2026-01-02T00:00:00+00:00", "live", d2
     )
+    diff = json.loads((d2 / "signal_diff.json").read_text(encoding="utf-8"))
     assert diff["BTC"]["action"] == "changed"
     assert diff["BTC"]["prev"]["momentum"] == 6.25
     assert diff["BTC"]["cur"]["momentum"] == 5.0
     assert diff["ETH"]["action"] == "unchanged"
-    snap = json.loads(
-        (Path("reports") / "latest" / "snapshot.json").read_text(encoding="utf-8")
-    )
+    snap = json.loads((d2 / "snapshot.json").read_text(encoding="utf-8"))
     assert snap["signals"]["BTC"]["momentum"] == 5.0  # 快照已覆盖为新
 
-    # 损坏快照（非法 UTF-8/坏 JSON）→ 视为无 prev，不抛异常
-    latest = Path("reports") / "latest"
-    (latest / "snapshot.json").write_bytes(b"\xff\xfe\x00broken")
-    assert report._read_prev_snapshot() is None
-    (latest / "snapshot.json").write_text("{not json", encoding="utf-8")
-    assert report._read_prev_snapshot() is None
+    # 损坏快照（非法 UTF-8/坏 JSON）→ 视为无 prev，不抛异常（隔离目录：无合法快照干扰）
+    clean = tmp_path / "clean"
+    clean.mkdir()
+    monkeypatch.chdir(clean)
+    broken = Path("reports") / "20260103T000000Z000"
+    broken.mkdir(parents=True)
+    (broken / "snapshot.json").write_bytes(b"\xff\xfe\x00broken")
+    assert report._read_prev_snapshot(["BTC"]) is None
+    (broken / "snapshot.json").write_text("{not json", encoding="utf-8")
+    assert report._read_prev_snapshot(["BTC"]) is None
+
+
+def test_snapshot_bare_symbol_matching(monkeypatch, tmp_path):
+    """裸符号对齐（改动 6）：prev tokens 为 USDT 前缀形态（自动）时，手动裸符号批
+    仍能跨目录匹配到 prev（交集按 _strip_quote 归一）；diff key 对齐裸符号。"""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SR_MOCK", "0")
+    # 自动模式形态：数据域键与 tokens 均带 USDT 前缀
+    auto = _mk_state(["BTCUSDT", "ETHUSDT"])
+    auto["signals"] = {"BTCUSDT": {"momentum": {"value": 6.25}}}
+    d1 = Path("reports") / "20260101T000000Z000"
+    d1.mkdir(parents=True)
+    report._write_snapshot_and_diff(
+        auto, "2026-01-01T00:00:00+00:00", "live", d1
+    )
+    # 手动模式形态：裸符号（BTWUSDT 前缀归一后与 BTC 同标的）
+    manual = _mk_state(["BTC", "ETH"])
+    manual["signals"] = {"BTC": {"momentum": {"value": 5.0}}}
+    d2 = Path("reports") / "20260102T000000Z000"
+    d2.mkdir(parents=True)
+    report._write_snapshot_and_diff(
+        manual, "2026-01-02T00:00:00+00:00", "live", d2
+    )
+    snap = json.loads((d2 / "snapshot.json").read_text(encoding="utf-8"))
+    assert "BTCUSDT" not in snap["signals"]  # signals 键为裸符号
+    diff = json.loads((d2 / "signal_diff.json").read_text(encoding="utf-8"))
+    assert diff["BTC"]["action"] == "changed"  # 6.25 → 5.0，跨形态匹配
+    assert diff["BTC"]["prev"]["momentum"] == 6.25
 
 
 def test_artifacts_failure_records_report_error(monkeypatch, tmp_path):
     """失败语义：工件失败仅记 report_error，run.json/evidence.md 不丢，批不中断。"""
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SR_MOCK_REPORT", "1")
 
     def _boom(state):
         raise RuntimeError("工件计算失败")
@@ -119,6 +157,7 @@ def test_llm_calls_counting(monkeypatch) -> None:
 def test_run_json_meta_llm_calls(monkeypatch, tmp_path):
     """run.json meta 含 llm_calls，且同步进节点 meta（规格 state.meta.llm_calls）。"""
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SR_MOCK_REPORT", "1")
     monkeypatch.setattr(report, "_MOCK_CALL_COUNTS", {"bull": 2, "bear": 1})
     meta: dict = {}
     run_dir, _ = report.build_report(_mk_state(["BTC"]), meta)
@@ -273,13 +312,6 @@ def _evidence_state() -> dict:
         },
         "ETH": {"social_price_divergence": {"value": {}}},
     }
-    state[
-        "scanner_snapshot"
-    ] = {  # 07 票：快照日期透传与证据节标注（防旧快照误读为实时）
-        "date": "2026-08-16",
-        "market": {"BTC": {"price": 69000.0, "ret_24h": -1.2}},
-        "microstructure": {"BTC": {"ls_ratio_all": 0.9}},
-    }
     return state
 
 
@@ -308,14 +340,14 @@ def test_evidence_md_sections():
     assert "运行模式：`mock`" in md
     assert "tokens：BTC, ETH" in md
     assert "LLM 调用：12" in md
-    # 总览表（09 票：列名不再隐含方向，新增剔除数列）
-    assert "| token | 最新价格 | 做多通过 | 做空通过 | 剔除 | 数据域覆盖 |" in md
-    assert "| BTC | 70000 | 3 | 1 | 2 | signals, market_data |" in md
-    assert "| ETH | — | 0 | 0 | 0 | — |" in md
+    assert re.search(r"- 本地时间：\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [+-]\d{2}:\d{2}", md)
+    # 总览表（09 票：列名不再隐含方向，新增剔除数列；信号缺失列：快照 None 键计数）
+    assert "| token | 最新价格 | 信号缺失 | 做多通过 | 做空通过 | 剔除 | 数据域覆盖 |" in md
+    assert "| BTC | 70000 | 9 | 3 | 1 | 2 | signals, market_data |" in md
+    assert "| ETH | — | 28 | 0 | 0 | 0 | — |" in md
     assert "不构成多空结论" in md  # 09 票：计数不是方向强度
     # 每 token 节：做多/做空两张表（# | claim | basis | source）
     assert "## BTC" in md
-    assert "- 扫描器快照日期：2026-08-16" in md  # 07 票：快照日期标注
     assert "### 做多证据" in md
     assert "| # | claim | basis | source |" in md
     assert (
@@ -367,7 +399,7 @@ def test_rejected_lines_aggregate_same_failure_mode():
 def test_evidence_md_empty_state():
     """空态：无证据/无剔除 → 占位不报错，报告仍生成。"""
     md = _render_evidence(_mk_state(["BTC"]))
-    assert "| BTC | — | 0 | 0 | 0 | — |" in md
+    assert "| BTC | — | 28 | 0 | 0 | 0 | — |" in md  # 无数据 → 信号快照全 None
     assert "（无做多证据）" in md
     assert "（无做空证据）" in md
     assert "（本批无剔除记录）" in md
@@ -456,14 +488,19 @@ def test_field_changed_materiality():
 
 
 def test_candidates_simplified():
-    """验收：candidates.json 仅候选列表（机会分级/流动性分层退役，spec D8）。"""
-    a = report._build_artifacts(_mk_state(["BTC", "ETH"]))
-    assert a == {"candidates": ["BTC", "ETH"]}
+    """验收：candidates.json = mode 三态 + 候选列表（07 票：mode 消除手动模式歧义）。"""
+    assert report._build_artifacts(_mk_state(["BTC", "ETH"]), "manual") == {
+        "mode": "manual",
+        "candidates": ["BTC", "ETH"],
+    }
+    assert report._build_artifacts(_mk_state(["BTC"]), "auto")["mode"] == "auto"
+    assert report._build_artifacts(_mk_state(["BTC"]), "mock")["mode"] == "mock"
 
 
 def test_run_json_evidence_and_snapshot(monkeypatch, tmp_path):
     """验收：run.json 含证据清单（evidence/rejected_evidence）+ 数据快照投影 + 信号快照。"""
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SR_MOCK_REPORT", "1")
     run_dir, _ = report.build_report(_evidence_state(), {})
     run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
     assert run["evidence"]["BTC"]["bull_case"][0]["claim"].startswith("动量分")
@@ -476,10 +513,66 @@ def test_run_json_evidence_and_snapshot(monkeypatch, tmp_path):
         == "rising"
     )
     assert run["data_snapshot"]["ETH"]["signals"]["error"] == "模拟信号层失败"
-    assert (
-        run["data_snapshot"]["BTC"]["scanner_snapshot"]["date"] == "2026-08-16"
-    )  # 07 票：快照日期透传
     assert run["signals"]["BTC"]["momentum"] == 6.25
     assert run["signals"]["BTC"]["quadrant"] == "III"
     assert run["signals"]["BTC"]["tvl_trend_30d"] == "rising"
     assert run["signals"]["ETH"] == _ALL_NONE
+
+
+def test_compute_status_tri_state() -> None:
+    """运行健康度三态：failed（LLM 全挂）/ degraded（分支异常/不完整/高剔除率）/ ok。
+
+    基准 state 为 4 通过 + 2 剔除（剔除率 33% < 50% 阈值）→ ok。
+    """
+    state = _evidence_state()
+    base = {"llm_calls": {"total": 12}, "bull_errors": {}, "bear_errors": {}}
+    status, reason = report._compute_status(base, state)
+    assert status == "ok"
+    assert reason == ""
+
+    # failed：LLM 调用数为 0（API key 缺失等全挂，对应 8/25 首份）
+    status, reason = report._compute_status(
+        {**base, "llm_calls": {"total": 0}}, state
+    )
+    assert status == "failed"
+    assert "0" in reason
+
+    # degraded：分支异常留痕
+    status, reason = report._compute_status(
+        {**base, "bull_errors": {"BTC": "模型超时"}}, state
+    )
+    assert status == "degraded"
+    assert "分支异常" in reason
+
+    # degraded：incomplete_tokens 非空
+    status, _ = report._compute_status(
+        {**base, "incomplete_tokens": ["BTCUSDT"]}, state
+    )
+    assert status == "degraded"
+
+    # degraded：剔除率超过 50%（4 通过 + 2 已有剔除 + 10 追加 = 12/16 = 75%）
+    state["rejected_evidence"] = {
+        "BTC": [{"claim": "x", "reason": "值不一致"}] * 12
+    }
+    status, _ = report._compute_status(base, state)
+    assert status == "degraded"
+
+
+def test_evidence_md_status_line() -> None:
+    """evidence.md 头部含运行状态行；degraded/failed 附原因。"""
+    state = _evidence_state()
+    run = {
+        "meta": {
+            "mode": "mock",
+            "run_ts": "2026-08-21T00:00:00+00:00",
+            "llm_calls": {"total": 12},
+            "status": "degraded",
+            "status_reason": "分支异常",
+        },
+    }
+    md = report._render_evidence_md(state, run)
+    assert "- 运行状态：degraded（分支异常）" in md
+    run["meta"]["status"] = "ok"
+    md = report._render_evidence_md(state, run)
+    assert "- 运行状态：ok" in md
+    assert "（" not in md.split("- 运行状态：ok")[1].splitlines()[0]

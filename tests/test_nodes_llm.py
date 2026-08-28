@@ -1,4 +1,4 @@
-"""02/03 票验收：分支节点 LLM 链（mock 假模型全链 + 分支摘要 + 扫描器快照）。
+"""02/03 票验收：分支节点 LLM 链（mock 假模型全链 + 分支摘要）。
 
 mock 模式 get_llm 返回确定性假模型（env._MockChatModel），LLM 调用计数走
 env._MOCK_CALL_COUNTS（03 票：键为 bull/bear），全链两分支各 6 次可验证。
@@ -7,10 +7,13 @@ env._MOCK_CALL_COUNTS（03 票：键为 bull/bear），全链两分支各 6 次�
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
 import pytest
+from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+from langchain_core.messages import AIMessage
 
 from strategy_research import context, env, nodes
 from strategy_research.graph import build_graph
@@ -75,61 +78,42 @@ def test_mock_routing_keys_linked_to_prompts():
     assert "空头证据研究员" in context.BEAR_PROMPT  # → bear
 
 
-# ── 分支摘要与扫描器快照（03 票保留：分支消费同一份快照） ──────
+def test_branch_dedup_applied_on_llm_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    """分支产出前机器去重兜底：同 basis 三元组、去空白后同 claim 的条目只留首条。
 
+    LLM 违规凑数/改写时由 dedup_evidence 兜底（提示词约束之外的第二道防线），
+    顺序保持 LLM 输出序（按重要性降序，去重不重排）。
+    """
+    raw = {
+        "evidence": [
+            {
+                "claim": "动量分 6.25 处增长区",
+                "basis": {"domain": "signals", "field": "momentum.value", "value": "6.25"},
+                "source": "signals",
+            },
+            {
+                "claim": "动量分 6.25 处增长区（换措辞）",
+                "basis": {"domain": "signals", "field": "momentum.value", "value": "6.25"},
+                "source": "signals",
+            },  # 同三元组重复
+            {
+                "claim": "动量分 6.25 处\n增长区 ",
+                "basis": {"domain": "signals", "field": "divergence.value.quadrant", "value": "III"},
+                "source": "signals",
+            },  # 三元组不同但去空白后同 claim
+            {
+                "claim": "价格 70000 美元",
+                "basis": {"domain": "market_data", "field": "price.value", "value": "70000.0"},
+                "source": "market_data",
+            },
+        ]
+    }
+    fake = FakeMessagesListChatModel(responses=[AIMessage(content=json.dumps(raw))])
+    monkeypatch.setattr(nodes.env, "get_llm", lambda *a, **k: fake)
+    out = nodes.bull_research({"tokens": ["BTC"]})
+    claims = [it["claim"] for it in out["bull_evidence"]["BTC"]]
+    assert claims == ["动量分 6.25 处增长区", "价格 70000 美元"]
 
-_SNAP_STATE = {
-    "date": "2026-08-16",
-    # 快照 key = 裸符号（与 scanner_snapshot._strip_quote 归一化一致）
-    "market": {
-        "AKE": {
-            "price": 0.009465,
-            "ret_1h": 3.9425,
-            "ret_4h": 0.0952,
-            "ret_24h": -10.3184,
-            "ret_7d": 132.2585,
-            "price_change_pct_24h": -8.668,
-            "quote_volume_24h": 202807691.0,
-            "funding_rate": 5e-05,
-            "taker_buy_ratio_24h": 0.4983,
-            "open_interest_value": 39484773.0,
-            "futures_premium_pct": 0.1501,
-            "listing_days": 324.0,
-            "onboard_date": "2025-09-26",
-            "boards": ["gain_1h", "loss_24h", "gain_7d"],
-        }
-    },
-    "microstructure": {
-        "AKE": {
-            "oi_change_24h": -0.5416,
-            "oi_change_48h": -27.8883,
-            "oi_value_change_24h": -10.0886,
-            "ls_ratio_all": 0.5172,
-            "ls_ratio_all_change_24h": -3.2186,
-            "ls_ratio_top_acc": 0.4286,
-            "ls_ratio_top_pos": 0.6445,
-            "taker_bs_ratio": 1.0105,
-            "funding_avg": 7.9e-05,
-            "funding_trend": "flat",
-        }
-    },
-}
-
-
-@pytest.fixture(scope="module")
-def scanned_full_result(tmp_path_factory):
-    """mock 全链一次（1 token + 快照注入）：collect_data 后 state 带 scanner_snapshot。
-    落盘隔离在临时目录，不写项目 reports/。"""
-    _reset_counts()
-    cwd = Path.cwd()
-    os.chdir(tmp_path_factory.mktemp("scanned_chain"))
-    try:
-        result = build_graph().invoke(
-            {"tokens": ["AKEUSDT"], "scanner_snapshot": _SNAP_STATE, "meta": {}}
-        )
-    finally:
-        os.chdir(cwd)
-    return result
 
 
 def test_extract_partial_evidence_recovers_truncated_json():
@@ -210,37 +194,3 @@ def test_truncation_probe_reports_content_shape():
     assert '{"evidence"' in probe["head"]
     # 非截断异常 → 无探测信息
     assert nodes._truncation_probe(RuntimeError("网络错误")) == {}
-
-
-def test_facts_summary_scanner_section():
-    """验收：摘要含扫描器快照节（完整路径 market.{SYMBOL}.xxx 与口径标注）；
-    快照缺失 → 无该节。"""
-    state = {"tokens": ["AKEUSDT"], "signals": {}, "scanner_snapshot": _SNAP_STATE}
-    summary = "\n".join(context._facts_summary_lines("AKEUSDT", state))
-    assert (
-        "== 扫描器快照（scanner_snapshot，截至 2026-08-16，field 直接抄写下方完整路径）=="
-        in summary
-    )
-    assert "market.AKE.price: 0.009465" in summary
-    assert "market.AKE.ret_1h: 3.94%" in summary
-    assert "market.AKE.ret_24h: -10.32%" in summary
-    assert "market.AKE.price_change_pct_24h: -8.67%" in summary
-    assert "market.AKE.futures_premium_pct: 0.15%" in summary
-    assert "market.AKE.onboard_date: 2025-09-26" in summary
-    assert "market.AKE.boards: gain_1h、loss_24h、gain_7d" in summary
-    assert "microstructure.AKE.ls_ratio_all: 0.52" in summary
-    assert "microstructure.AKE.funding_avg: 0.000079" in summary
-    assert "microstructure.AKE.funding_trend: flat" in summary
-
-    no_snap = {"tokens": ["BTC"], "signals": {}}
-    no_text = "\n".join(context._facts_summary_lines("BTC", no_snap))
-    assert "扫描器快照" not in no_text
-
-
-def test_mock_full_chain_keeps_scanner_snapshot(scanned_full_result):
-    """验收：全链 state 透传 scanner_snapshot（分支摘要同源参考，④ 报告消费）。"""
-    result = scanned_full_result
-    snap = result["scanner_snapshot"]
-    assert snap["date"] == "2026-08-16"
-    assert snap["market"]["AKE"]["price"] == 0.009465
-    assert snap["microstructure"]["AKE"]["funding_trend"] == "flat"

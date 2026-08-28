@@ -229,33 +229,6 @@ class TestBranchSummaryContract:
         assert "原决策" not in summary
         assert "校准基线" not in summary
 
-    def test_scanner_snapshot_section_uses_bare_symbol_key(self):
-        """扫描器快照 key = 裸符号（AKEUSDT → AKE）：tokens 全符号也能渲染快照节。
-
-        契约：data 源边界归一化为裸符号（与 scanner_snapshot._strip_quote 一致），
-        摘要渲染路径 market.BTC.price 与核验解引用（evidence._resolve）对齐。
-        """
-        state = _state_with()
-        state["scanner_snapshot"] = {
-            "date": "2026-08-16",
-            "market": {
-                "BTC": {
-                    "price": 70000.0,
-                    "ret_24h": 2.5,
-                    "boards": ["top_gainers"],
-                }
-            },
-            "microstructure": {"BTC": {"ls_ratio_all": 1.2}},
-        }
-        summary = context.build_branch_summary("BTC", state)
-        assert "== 扫描器快照（scanner_snapshot，截至 2026-08-16" in summary
-        assert "market.BTC.price: 70000.000000" in summary
-        assert "market.BTC.boards: top_gainers" in summary
-        assert "microstructure.BTC.ls_ratio_all: 1.20" in summary
-        # 快照缺失 → 节整体跳过（不渲染空节占位）
-        empty = context.build_branch_summary("BTC", _state_with())
-        assert "== 扫描器快照" not in empty
-
 
 class TestNoteSingleSource:
     """解读规则注记单一来源：signals 与 mock 输出同一常量。"""

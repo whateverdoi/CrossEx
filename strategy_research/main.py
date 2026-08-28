@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
+from pathlib import Path
 
 from strategy_research import env
 from strategy_research.graph import build_graph
-from strategy_research.scanner_snapshot import ENV_AUTO, refresh_if_stale
 from strategy_research.screener import (
     DEFAULT_MAX_PER_CATEGORY,
     DEFAULT_RULES,
@@ -53,20 +54,39 @@ def _resolve_tokens(args: argparse.Namespace) -> tuple[list[str], dict]:
     }
 
 
-def main(argv: list[str] | None = None) -> dict:
-    """主流程：扫描器快照新鲜度检查 → 解析 tokens → 建图 → invoke → meta。
+#: 08 票：live 报告保留份数（SR_KEEP_REPORTS 可调，0 = 不清理）
+DEFAULT_KEEP_REPORTS = 30
 
-    非 mock 模式且 SR_SCAN_AUTO 未关闭时，快照陈旧会自动补跑扫描器（子进程），
-    用户无需手动操作；补跑结果写入 meta["scanner"]（run.json 落盘）。
+
+def _cleanup_old_reports() -> None:
+    """报告归档清理：仅保留最新 N 份 live 报告（reports/<ts>/ 目录）。
+
+    SR_KEEP_REPORTS（默认 30，0 = 不清理）：目录名即 UTC 时间戳，按字典序
+    删除最旧的溢出份。reports/mock/（mock 落盘产物）与 reports/latest/（软链）
+    不在匹配范围，不受影响。
     """
+    try:
+        keep = int(os.environ.get("SR_KEEP_REPORTS", DEFAULT_KEEP_REPORTS))
+    except ValueError:  # 非法值兜底为默认
+        keep = DEFAULT_KEEP_REPORTS
+    if keep <= 0:
+        return
+    dirs = sorted(p for p in Path("reports").glob("2*") if p.is_dir())
+    for old in dirs[:-keep] if len(dirs) > keep else []:
+        shutil.rmtree(old, ignore_errors=True)
+
+
+def main(argv: list[str] | None = None) -> dict:
+    """主流程：解析 tokens → 建图 → invoke → meta。"""
     env.reset_call_counts()  # 每次运行计数从 0 开始（llm_calls = 本次运行）
     args = parse_args(argv)
     tokens, screening = _resolve_tokens(args)
     meta: dict = {"screening": screening}
-    if not env.is_mock_mode() and os.environ.get(ENV_AUTO, "1") != "0":
-        meta["scanner"] = refresh_if_stale()
     app = build_graph()
     result = app.invoke({"tokens": tokens, "meta": meta})
+    # 08 票：live 运行结束后归档清理（mock 回归跑批无副作用，不清理）
+    if not env.is_mock_mode():
+        _cleanup_old_reports()
     return result["meta"]
 
 
