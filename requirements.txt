@@ -1,4 +1,4 @@
-# CryptoResearch 运行依赖
+# CrossEx 运行依赖
 langgraph
 langchain
 langchain-core

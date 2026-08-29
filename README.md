@@ -1,4 +1,4 @@
-# CryptoResearch
+# CrossEx
 
 加密资产策略研究 Agent：一条 6 节点并行分支 LangGraph 管线——确定性信号层 → 多空证据双分支并行采证（bull/bear 互不可见）→ 确定性证据核验 → 证据工件落盘，最终产出可验证的证据陈列报告工件。
 
@@ -159,7 +159,7 @@ bear_research       空头证据研究员（json_mode 单次调用，数量不�
 strategy_research/
 ├── main.py             # CLI 入口：tokens 解析 → 建图 → invoke
 ├── graph.py            # 6 节点装配 + 编译冒烟
-├── nodes.py            # 各节点实现（数据装配/信号/分支/核验/报告）
+├── nodes/              # 图节点包：collect.py（① 数据装配）/ branches.py（LLM 多空分支与 JSON 恢复）/ wrapup.py（②③④ 信号·核验·落盘）；__init__.py 保持原属性面
 ├── signals.py          # 确定性信号纯函数（无 IO，缺失 → None）
 ├── screener.py         # 币种筛选规则引擎（Filter AND → Rank Top N → 板块上限）
 ├── schemas.py          # 宽容 JSON 解析器（_extract_json 系列）
